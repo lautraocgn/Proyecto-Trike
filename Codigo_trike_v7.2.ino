@@ -60,7 +60,7 @@ const uint16_t DEFAULT_POS_B_2     = 878;
 // DEBUG
 // =============================================================================
 
-#define DEBUG 1
+#define DEBUG 1   // Cambiar a 0 para producción
 
 #if DEBUG
   #define DBG(x)        Serial.print(F(x))
@@ -274,7 +274,7 @@ void iniciarCambioA(Marcha destino);
 void entrarErrorGrave();
 const char* nombreMarcha(Marcha m);
 const char* nombreEstado(Estado e);
-void logEstado();
+//void logEstado();
 void logPot();
 void logAccion(const char* accion);
 void procesarComandoSerial();
@@ -331,7 +331,7 @@ void loop() {
     potDoble.lecturaEfectiva = obtenerLecturaSegura();
   }
 
-  logEstado();
+//  logEstado();
   logPot();
   manejarParpadeoPotAlert();
   procesarComandoSerial();
@@ -343,7 +343,7 @@ void loop() {
       estadoActual != APRENDIZAJE_MOVIENDO &&
       estadoActual != APRENDIZAJE_CONFIRMANDO &&
       estadoActual != ERROR_GRAVE) {
-    logAccion("Entrando en MODO APRENDIZAJE");
+    logAccion("MODO APRENDIZAJE");
     apagarTodoReles();
     estadoActual      = MODO_APRENDIZAJE;
     marchaAprendizaje = MARCHA_N;
@@ -409,85 +409,35 @@ void printResetCause() {
 
 void printDiagnosticoInicial() {
 #if DEBUG
-  DBGLN("========================================");
-  DBGLN("TRIKE AUTOSTICK v5.5 - INICIO");
-  DBGLN("========================================");
+  DBGLN("V7.2");
   printResetCause();
   
-  DBG("EEPROM (A): R=");
+  // EEPROM en formato compacto: R=334/338 N=703/709 1=461/468 2=874/878
+  DBG("EEPROM: R=");
   DBG_VAL(posADC_A[MARCHA_R]);
-  DBG(" N=");
-  DBG_VAL(posADC_A[MARCHA_N]);
-  DBG(" 1=");
-  DBG_VAL(posADC_A[MARCHA_1]);
-  DBG(" 2=");
-  DBGLN_VAL(posADC_A[MARCHA_2]);
-  
-  DBG("EEPROM (B): R=");
+  DBG("/");
   DBG_VAL(posADC_B[MARCHA_R]);
   DBG(" N=");
+  DBG_VAL(posADC_A[MARCHA_N]);
+  DBG("/");
   DBG_VAL(posADC_B[MARCHA_N]);
   DBG(" 1=");
+  DBG_VAL(posADC_A[MARCHA_1]);
+  DBG("/");
   DBG_VAL(posADC_B[MARCHA_1]);
   DBG(" 2=");
+  DBG_VAL(posADC_A[MARCHA_2]);
+  DBG("/");
   DBGLN_VAL(posADC_B[MARCHA_2]);
   
-  int16_t diffR = abs((int)posADC_A[MARCHA_R] - (int)posADC_B[MARCHA_R]);
-  int16_t diffN = abs((int)posADC_A[MARCHA_N] - (int)posADC_B[MARCHA_N]);
-  int16_t diff1 = abs((int)posADC_A[MARCHA_1] - (int)posADC_B[MARCHA_1]);
-  int16_t diff2 = abs((int)posADC_A[MARCHA_2] - (int)posADC_B[MARCHA_2]);
-  
-  DBG("Diferencias: R=");
-  DBG_VAL(diffR);
-  DBG(" N=");
-  DBG_VAL(diffN);
-  DBG(" 1=");
-  DBG_VAL(diff1);
-  DBG(" 2=");
-  DBG_VAL(diff2);
-  
-  if (diffR < 20 && diffN < 20 && diff1 < 20 && diff2 < 20) {
-    DBGLN(" (OK)");
-  } else {
-    DBGLN(" (¡ATENCIÓN! diferencias grandes)");
-  }
-  
-  uint16_t objN = posEfectiva(MARCHA_N);
-  int16_t diffPos = (int16_t)potDoble.lecturaEfectiva - (int16_t)objN;
-  
-  DBG("Pot actual: ");
-  DBGLN_VAL(potDoble.lecturaEfectiva);
-  DBG("Objetivo N: ");
-  DBGLN_VAL(objN);
-  DBG("Diferencia: ");
-  DBG_VAL(diffPos);
-  DBGLN(" (tolerancia ±8)");
-  
-  int16_t diffPistas = abs((int)potDoble.lecturaA - (int)potDoble.lecturaB);
-  DBG("Pista A: ");
+  // Potenciómetros iniciales
+  DBG("Pot  A:");
   DBG_VAL(potDoble.lecturaA);
-  DBG("  Pista B: ");
+  DBG("   B:");
   DBG_VAL(potDoble.lecturaB);
-  DBG("  (dif=");
-  DBG_VAL(diffPistas);
-  if (diffPistas < 30) {
-    DBGLN(" OK)");
-  } else {
-    DBGLN(" ¡ATENCIÓN! pistas inconsistentes)");
-  }
-  
-  DBG("Pista activa: ");
+  DBG("   Act:");
   DBGLN_VAL(potDoble.pistaActiva == 0 ? "A" : "B");
   
-  DBG("FC_C: ");
-  DBG_VAL(digitalRead(PIN_FC_C) ? "HIGH" : "LOW");
-  DBG(" (ADC=");
-  DBG_VAL(analogRead(PIN_FC_C));
-  DBG(")  FC_S: ");
-  DBG_VAL(digitalRead(PIN_FC_S) ? "HIGH" : "LOW");
-  DBG(" (ADC=");
-  DBG_VAL(analogRead(PIN_FC_S));
-  DBGLN(")");
   DBGLN("");
 #endif
 }
@@ -507,9 +457,6 @@ void logCambioMarcha(Marcha origen, Marcha destino) {
 
 void logRele(const char* nombre, bool activado) {
 #if DEBUG
-  DBG("[");
-  DBG_VAL(millis());
-  DBG("ms] ");
   DBG_VAL(nombre);
   DBGLN_VAL(activado ? " ON" : " OFF");
 #endif
@@ -517,21 +464,15 @@ void logRele(const char* nombre, bool activado) {
 
 void logFCCambio(const char* mensaje) {
 #if DEBUG
-  DBG("[");
-  DBG_VAL(millis());
-  DBG("ms] ");
   DBGLN_VAL(mensaje);
 #endif
 }
 
 void logPosicionAlcanzada(Marcha m) {
 #if DEBUG
-  DBG("[");
-  DBG_VAL(millis());
-  DBG("ms] ");
+  DBG("POS ");
   DBG_VAL(nombreMarcha(m));
-  DBG(" alcanzado - Pot: ");
-  DBGLN_VAL(potDoble.lecturaEfectiva);
+  DBGLN(" OK");
 #endif
 }
 
@@ -567,6 +508,7 @@ const char* nombreEstado(Estado e) {
   return "?";
 }
 
+/*
 void logEstado() {
 #if DEBUG
   if (estadoActual != ultimoEstadoLog) {
@@ -580,6 +522,7 @@ void logEstado() {
   }
 #endif
 }
+*/
 
 void logPot() {
 #if DEBUG
@@ -587,34 +530,35 @@ void logPot() {
   static bool primerLog = true;
   
   uint16_t actual = potDoble.lecturaEfectiva;
+  bool cambioSignificativo = (primerLog || abs((int)actual - (int)ultimaLecturaLog) > 8);
   
-  if (primerLog || abs((int)actual - (int)ultimaLecturaLog) > 10) {
+  if (cambioSignificativo) {
     primerLog = false;
     ultimaLecturaLog = actual;
     
-    DBG("[");
-    DBG_VAL(millis());
-    DBG("ms] Pot=");
-    DBG_VAL(actual);
-    DBG(" A=");
-    DBG_VAL(potDoble.lecturaA);
-    DBG(" B=");
-    DBG_VAL(potDoble.lecturaB);
-    DBG(" Pista=");
-    DBG_VAL(potDoble.pistaActiva == 0 ? "A" : "B");
-    DBG(" Fallas A=");
-    DBG_VAL(potDoble.pistaAFallada ? "S" : "N");
-    DBG(" B=");
-    DBGLN_VAL(potDoble.pistaBFallada ? "S" : "N");
+    // Si es la primera vez o hay cambio de pista, mostrar formato completo
+    if (primerLog) {
+      DBG("Pot  A:");
+      DBG_VAL(potDoble.lecturaA);
+      DBG("   B:");
+      DBG_VAL(potDoble.lecturaB);
+      DBG("   Act:");
+      DBGLN_VAL(potDoble.pistaActiva == 0 ? "A" : "B");
+    } else {
+      // Formato compacto durante el movimiento
+      DBG("P ");
+      DBG_VAL(potDoble.lecturaA);
+      DBG("/");
+      DBG_VAL(potDoble.lecturaB);
+      DBG(" Act:");
+      DBGLN_VAL(potDoble.pistaActiva == 0 ? "A" : "B");
+    }
   }
 #endif
 }
 
 void logAccion(const char* accion) {
 #if DEBUG
-  DBG("[");
-  DBG_VAL(millis());
-  DBG("ms] ");
   DBGLN_VAL(accion);
 #endif
 }
@@ -704,7 +648,7 @@ void activarReleIn() {
   }
   digitalWrite(PIN_REL_IN, HIGH);
   relInActivo = true;
-  logRele("REL_IN", true);
+  logRele("IN", true);
 }
 
 void activarReleOut() {
@@ -748,7 +692,7 @@ void gestionarRetardoRele() {
       relPendienteOut = false;
       digitalWrite(PIN_REL_OUT, HIGH);
       relOutActivo = true;
-      logRele("REL_OUT", true);
+      logRele("OUT", true);
     }
   }
 }
@@ -1142,14 +1086,14 @@ void estadoArranque() {
     bloqueoCambio = false;
     estadoActual = REPOSO;
     logPosicionAlcanzada(MARCHA_N);
-    logEstado();
+//    logEstado();
     return;
   }
 
   moverHacia(posEfectiva(MARCHA_N));
 
   if ((ahora - tiempoInicio) >= TIMEOUT_MS) {
-    logAccion("TIMEOUT en arranque -> ERROR GRAVE");
+    logAccion("TIMEOUT arranque");
     entrarErrorGrave();
   }
 }
@@ -1212,7 +1156,7 @@ void iniciarCambioA(Marcha destino) {
   logCambioMarcha(marchaOrigen, marchaDestino);
   activarK1();
   estadoActual = ESPERANDO_FC_C;
-  logEstado();
+//  logEstado();
 }
 
 void estadoEsperandoFCC() {
@@ -1222,12 +1166,12 @@ void estadoEsperandoFCC() {
       marchaDestino = MARCHA_N;
       tiempoInicio = millis();
       estadoActual = RECUPERANDO_A_N;
-      logEstado();
+//      logEstado();
     }
     return;
   }
 
-  logFCCambio("FC_C confirmado");
+  logFCCambio("FC_C OK");
   tiempoInicio = millis();
 
   if (marchaDestino == MARCHA_R) {
@@ -1240,7 +1184,7 @@ void estadoEsperandoFCC() {
   }
 
   estadoActual = MOVIENDO;
-  logEstado();
+//  logEstado();
 }
 
 void estadoMoviendo() {
@@ -1259,7 +1203,7 @@ void estadoMoviendo() {
   if (cambioCarrilPendiente) {
     moverHacia(posEfectiva(MARCHA_N));
     if (analogRead(PIN_FC_S) < 100) {
-      logFCCambio("FC_S activo -> continuar hacia R");
+      logFCCambio("FC_S OK");
       cambioCarrilPendiente = false;
       tiempoInicio = ahora;
       moverHacia(posEfectiva(MARCHA_R));
@@ -1282,7 +1226,7 @@ void estadoMoviendo() {
     if (marchaActual == MARCHA_R && marchaDestino == MARCHA_N) {
       tiempoAux = ahora;
       estadoActual = ESPERA_FC_S_RETORNO;
-      logEstado();
+//      logEstado();
       return;
     }
     desactivarK2();
@@ -1293,7 +1237,7 @@ void estadoMoviendo() {
     bloqueoCambio = true;
     tiempoBloqueo = ahora;
     estadoActual = REPOSO;
-    logEstado();
+//    logEstado();
     return;
   }
 
@@ -1304,7 +1248,7 @@ void estadoMoviendo() {
     marchaError = marchaDestino;
     tiempoInicio = ahora;
     estadoActual = RECUPERANDO_A_N;
-    logEstado();
+//    logEstado();
   }
 }
 
@@ -1320,7 +1264,7 @@ void estadoEsperaFCSRetorno() {
     tiempoBloqueo = ahora;
     estadoActual = REPOSO;
     logPosicionAlcanzada(MARCHA_N);
-    logEstado();
+//    logEstado();
     return;
   }
 
@@ -1341,7 +1285,7 @@ void estadoEmergenciaN() {
     bloqueoCambio = false;
     estadoActual  = REPOSO;
     logPosicionAlcanzada(MARCHA_N);
-    logEstado();
+//    logEstado();
     logAccion("Emergencia completada");
     return;
   }
@@ -1369,12 +1313,12 @@ void estadoRecuperandoN() {
     estadoActual = ERROR_LEVE;
     logPosicionAlcanzada(MARCHA_N);
     logAccion("Recuperado en N - ERROR LEVE");
-    logEstado();
+//    logEstado();
     return;
   }
 
   if ((ahora - tiempoInicio) >= TIMEOUT_MS) {
-    logAccion("TIMEOUT recuperando N -> ERROR GRAVE");
+    logAccion("TIMEOUT REC N");
     apagarActuador();
     desactivarK1();
     desactivarK2();
@@ -1400,13 +1344,13 @@ void estadoErrorLeve() {
       apagarActuador();
       activarK1();
       estadoActual = EMERGENCIA_A_N;
-      logEstado();
+//      logEstado();
       return;
     } else {
       encenderLED(marchaActual);
       estadoActual = REPOSO;
       logAccion("ERROR_LEVE borrado - en N");
-      logEstado();
+//      logEstado();
       return;
     }
   }
@@ -1454,7 +1398,7 @@ void entrarErrorGrave() {
   tiempoLed    = millis();
   estadoActual = ERROR_GRAVE;
   ambasPistasFalladas = true;
-  logAccion("*** ERROR GRAVE — requiere reset fisico ***");
+  logAccion("ERROR GRAVE");
 }
 
 // =============================================================================
