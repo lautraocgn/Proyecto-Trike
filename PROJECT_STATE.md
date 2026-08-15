@@ -8,7 +8,16 @@
 
 El código actual de GitHub es la fuente principal para el estado del software. Si `PROJECT_STATE.md` contradice al código, prevalece el código.
 
-Este archivo contiene solo información verificada del Proyecto Trike. No incorporar información de otros proyectos ni datos no confirmados.
+Este archivo contiene solo información verificable del Proyecto Trike. No incorporar información de otros proyectos ni datos no confirmados.
+
+## Nota operativa para futuras sesiones
+
+- El nombre del archivo del firmware es la referencia de versión. La versión escrita dentro de la cabecera del `.ino` puede estar desactualizada y no debe utilizarse para determinar la versión vigente.
+- Antes de analizar o modificar el firmware, consultar siempre `PROJECT_STATE.md` y después leer el archivo `.ino` actual de GitHub en la rama `main`.
+- Un `.ino` antiguo subido a una conversación no sustituye nunca al código de GitHub y no debe utilizarse si GitHub está disponible.
+- Si no se puede acceder al código actual de GitHub, detenerse y comunicarlo; no sustituirlo por una versión antigua disponible en la conversación.
+- Los archivos de otros proyectos, aunque estén disponibles en la conversación o tengan hardware/nombres similares, quedan fuera del Proyecto Trike salvo asociación explícita.
+- No escribir cambios en GitHub sin autorización explícita del usuario.
 
 ## Estado actual
 
