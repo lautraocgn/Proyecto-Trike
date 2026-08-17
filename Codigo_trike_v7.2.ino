@@ -63,8 +63,8 @@ const uint16_t DEFAULT_POS_B_2     = 878;
 #define DEBUG 1   // Cambiar a 0 para producción
 
 #if DEBUG
-  #define DBG(x)        Serial.print(F(x))
-  #define DBGLN(x)      Serial.println(F(x))
+  #define DBG(x)        Serial.print(x)
+  #define DBGLN(x)      Serial.println(x)
   #define DBG_VAL(x)    Serial.print(x)
   #define DBGLN_VAL(x)  Serial.println(x)
 #else
@@ -193,7 +193,7 @@ uint8_t  faseParpadeo      = 0;
 Marcha marchaAprendizaje   = MARCHA_N;
 
 bool   avisandoEEPROM      = false;
-uint32_t tiempoAvisoEEPROM = 0;v
+uint32_t tiempoAvisoEEPROM = 0;
 
 PotenciometroDoble potDoble = {
   0, 0, 0,
@@ -251,7 +251,7 @@ void printResetCause();
 void printDiagnosticoInicial();
 void logCambioMarcha(Marcha origen, Marcha destino);
 void logRele(const char* nombre, bool activado);
-void logFCCambio(const char* mensaje);
+void logFCCambio(const __FlashStringHelper* mensaje);
 void logPosicionAlcanzada(Marcha m);
 
 void estadoArranque();
@@ -269,9 +269,9 @@ void estadoAprendizajeConfirmando();
 
 void iniciarCambioA(Marcha destino);
 void entrarErrorGrave();
-const char* nombreMarcha(Marcha m);
+const __FlashStringHelper* nombreMarcha(Marcha m);
 void logPot();
-void logAccion(const char* accion);
+void logAccion(const __FlashStringHelper* accion);
 void procesarComandoSerial();
 
 // =============================================================================
@@ -337,7 +337,7 @@ void loop() {
       estadoActual != APRENDIZAJE_MOVIENDO &&
       estadoActual != APRENDIZAJE_CONFIRMANDO &&
       estadoActual != ERROR_GRAVE) {
-    logAccion("MODO APRENDIZAJE");
+    logAccion(F("MODO APRENDIZAJE"));
     apagarTodoReles();
     estadoActual      = MODO_APRENDIZAJE;
     marchaAprendizaje = MARCHA_N;
@@ -354,7 +354,7 @@ void loop() {
       (estadoActual == MODO_APRENDIZAJE ||
        estadoActual == APRENDIZAJE_MOVIENDO ||
        estadoActual == APRENDIZAJE_CONFIRMANDO)) {
-    logAccion("Saliendo de MODO APRENDIZAJE -> ARRANQUE");
+    logAccion(F("APRENDIZAJE OFF"));
     apagarTodoReles();
     estadoActual = ARRANQUE;
     tiempoInicio = ahora;
@@ -394,53 +394,55 @@ void printResetCause() {
   uint8_t mcusr = MCUSR;
   MCUSR = 0;
 
-  DBG("RST ");
+  DBG(F("RST "));
+
   if (mcusr & (1 << PORF)) {
-    DBG("Power-On");
+    DBG(F("Power-On"));
   }
   if (mcusr & (1 << EXTRF)) {
-    DBG("EXT");
+    DBG(F("EXT"));
   }
   if (mcusr & (1 << WDRF)) {
-    DBG("WDT");
+    DBG(F("WDT"));
   }
-  DBGLN("");
+
+  DBGLN(F(""));
 #endif
 }
 
 void printDiagnosticoInicial() {
 #if DEBUG
-  DBGLN("Versión 7.2");
+  DBGLN(F("Versión 7.2"));
   printResetCause();
 
-  DBG("EEP R");
+  DBG(F("EEP R"));
   DBG_VAL(posADC_A[MARCHA_R]);
-  DBG("/");
+  DBG(F("/"));
   DBG_VAL(posADC_B[MARCHA_R]);
 
-  DBG(" N");
+  DBG(F(" N"));
   DBG_VAL(posADC_A[MARCHA_N]);
-  DBG("/");
+  DBG(F("/"));
   DBG_VAL(posADC_B[MARCHA_N]);
 
-  DBG(" 1");
+  DBG(F(" 1"));
   DBG_VAL(posADC_A[MARCHA_1]);
-  DBG("/");
+  DBG(F("/"));
   DBG_VAL(posADC_B[MARCHA_1]);
 
-  DBG(" 2");
+  DBG(F(" 2"));
   DBG_VAL(posADC_A[MARCHA_2]);
-  DBG("/");
+  DBG(F("/"));
   DBGLN_VAL(posADC_B[MARCHA_2]);
 
-  DBG("Pot  A:");
+  DBG(F("Pot  A:"));
   DBG_VAL(potDoble.lecturaA);
-  DBG("   B:");
+  DBG(F("   B:"));
   DBG_VAL(potDoble.lecturaB);
-  DBG("   Act:");
-  DBGLN_VAL(potDoble.pistaActiva == 0 ? "A" : "B");
+  DBG(F("   Act:"));
+  DBGLN_VAL(potDoble.pistaActiva == 0 ? F("A") : F("B"));
 
-  DBGLN("");
+  DBGLN(F(""));
 #endif
 }
 
@@ -453,14 +455,14 @@ void logCambioMarcha(Marcha origen, Marcha destino) {
 #endif
 }
 
-void logRele(const char* nombre, bool activado) {
+void logRele(const __FlashStringHelper* nombre, bool activado) {
 #if DEBUG
   DBG_VAL(nombre);
-  DBGLN_VAL(activado ? " ON" : " OFF");
+  DBGLN_VAL(activado ? F(" ON") : F(" OFF"));
 #endif
 }
 
-void logFCCambio(const char* mensaje) {
+void logFCCambio(const __FlashStringHelper* mensaje) {
 #if DEBUG
   DBGLN_VAL(mensaje);
 #endif
@@ -478,14 +480,14 @@ void logPosicionAlcanzada(Marcha m) {
 // MONITOR SERIE
 // =============================================================================
 
-const char* nombreMarcha(Marcha m) {
+const __FlashStringHelper* nombreMarcha(Marcha m) {
   switch (m) {
-    case MARCHA_R: return "R";
-    case MARCHA_N: return "N";
-    case MARCHA_1: return "1";
-    case MARCHA_2: return "2";
+    case MARCHA_R: return F("R");
+    case MARCHA_N: return F("N");
+    case MARCHA_1: return F("1");
+    case MARCHA_2: return F("2");
   }
-  return "?";
+  return F("?");
 }
 
 /*
@@ -525,19 +527,13 @@ void logEstado() {
 void logPot() {
 #if DEBUG
   static uint16_t ultimaLecturaLog = 0;
-  static bool primerLog = true;
 
   uint16_t actual = potDoble.lecturaEfectiva;
 
-  bool cambioSignificativo =
-      primerLog ||
-      abs((int)actual - (int)ultimaLecturaLog) > 8;
-
-  if (!cambioSignificativo) {
+  if (abs((int)actual - (int)ultimaLecturaLog) <= 8) {
     return;
   }
 
-  primerLog = false;
   ultimaLecturaLog = actual;
 
   DBG("P ");
@@ -545,11 +541,11 @@ void logPot() {
   DBG("/");
   DBG_VAL(potDoble.lecturaB);
   DBG(" Act:");
-  DBGLN_VAL(potDoble.pistaActiva == 0 ? "A" : "B");
+  DBGLN_VAL(potDoble.pistaActiva == 0 ? F("A") : F("B"));
 #endif
 }
 
-void logAccion(const char* accion) {
+void logAccion(const __FlashStringHelper* accion) {
 #if DEBUG
   DBGLN_VAL(accion);
 #endif
@@ -564,7 +560,7 @@ void procesarComandoSerial() {
     char c = Serial.read();
 
     if (c == 'R' || c == 'r') {
-      logAccion("RESET Pot");
+      logAccion(F("RESET Pot"));
 
       potDoble.pistaAFallada = false;
       potDoble.pistaBFallada = false;
@@ -579,7 +575,7 @@ void procesarComandoSerial() {
       verificarPistas();
       potDoble.lecturaEfectiva = obtenerLecturaSegura();
 
-      DBGLN("Pot reset");
+      DBGLN(F("Pot reset"));
     }
   }
 }
@@ -645,7 +641,7 @@ void activarReleIn() {
   }
   digitalWrite(PIN_REL_IN, HIGH);
   relInActivo = true;
-  logRele("IN", true);
+  logRele(F("IN"), true);
 }
 
 void activarReleOut() {
@@ -663,7 +659,7 @@ void activarReleOut() {
 
   digitalWrite(PIN_REL_OUT, HIGH);
   relOutActivo = true;
-  logRele("OUT", true);
+  logRele(F("OUT"), true);
 }
 
 void apagarActuador() {
@@ -687,35 +683,35 @@ void gestionarRetardoRele() {
       relPendienteIn = false;
       digitalWrite(PIN_REL_IN, HIGH);
       relInActivo = true;
-      logRele("IN", true);
-
+      logRele(F("IN"), true);
+      
     } else if (relPendienteOut) {
       relPendienteOut = false;
       digitalWrite(PIN_REL_OUT, HIGH);
       relOutActivo = true;
-      logRele("OUT", true);
+      logRele(F("OUT"), true);
     }
   }
 }
 
 void activarK1() {
   digitalWrite(PIN_K1, HIGH);
-  logRele("K1", true);
+  logRele(F("K1"), true);
 }
 
 void desactivarK1() {
   digitalWrite(PIN_K1, LOW);
-  logRele("K1", false);
+  logRele(F("K1"), false);
 }
 
 void activarK2() {
   digitalWrite(PIN_K2, HIGH);
-  logRele("K2", true);
+  logRele(F("K2"), true);
 }
 
 void desactivarK2() {
   digitalWrite(PIN_K2, LOW);
-  logRele("K2", false);
+  logRele(F("K2"), false);
 }
 
 void apagarTodoReles() {
@@ -829,7 +825,7 @@ bool verificarPistas() {
   if (!validaA || !diffOk) {
     if (!potDoble.pistaAFallada) {
       potDoble.pistaAFallada = true;
-      logAccion("ERR Pot A");
+      logAccion(F("ERR Pot A"));
     }
   } else {
     potDoble.pistaAFallada = false;
@@ -838,7 +834,7 @@ bool verificarPistas() {
   if (!validaB || !diffOk) {
     if (!potDoble.pistaBFallada) {
       potDoble.pistaBFallada = true;
-      logAccion("ERR Pot B");
+      logAccion(F("ERR Pot B"));
     }
   } else {
     potDoble.pistaBFallada = false;
@@ -849,7 +845,7 @@ bool verificarPistas() {
       potDoble.pistaBFallada;
 
   if (ambasPistasFalladas) {
-    logAccion("ERR Pot A+B");
+    logAccion(F("ERR Pot A+B"));
 
     if (estadoActual != ERROR_GRAVE) {
       entrarErrorGrave();
@@ -860,14 +856,14 @@ bool verificarPistas() {
     if (!potDoble.pistaBFallada) {
       potDoble.pistaActiva = 1;
       potDoble.ultimoCambioPista = millis();
-      logAccion("Pot Act:B");
+      logAccion(F("Pot Act:B"));
     }
 
   } else if (potDoble.pistaActiva == 1 && potDoble.pistaBFallada) {
     if (!potDoble.pistaAFallada) {
       potDoble.pistaActiva = 0;
       potDoble.ultimoCambioPista = millis();
-      logAccion("Pot Act:A");
+      logAccion(F("Pot Act:A"));
     }
   }
 
@@ -878,6 +874,7 @@ uint16_t obtenerLecturaSegura() {
   if (potDoble.pistaActiva == 0 && !potDoble.pistaAFallada) {
     return potDoble.lecturaA;
   }
+
   if (potDoble.pistaActiva == 1 && !potDoble.pistaBFallada) {
     return potDoble.lecturaB;
   }
@@ -886,16 +883,17 @@ uint16_t obtenerLecturaSegura() {
     potDoble.pistaActiva = 0;
     return potDoble.lecturaA;
   }
+
   if (!potDoble.pistaBFallada) {
     potDoble.pistaActiva = 1;
     return potDoble.lecturaB;
   }
 
-  if (potDoble.lecturaEfectiva > 0 && potDoble.lecturaEfectiva < 1024) {
+  if (potDoble.lecturaEfectiva > 0 &&
+      potDoble.lecturaEfectiva < 1024) {
     return potDoble.lecturaEfectiva;
   }
-  
-  logAccion("*** Usando valor N por defecto ***");
+
   return posEfectiva(MARCHA_N);
 }
 
@@ -930,42 +928,66 @@ void moverHacia(uint16_t pos) {
 // =============================================================================
 
 void cargarPosiciones() {
-  bool eepromValida = (EEPROM.read(EEPROM_FIRMA_ADDR) == EEPROM_FIRMA_VAL);
-  
+  bool eepromValida =
+      (EEPROM.read(EEPROM_FIRMA_ADDR) == EEPROM_FIRMA_VAL);
+
   if (eepromValida) {
+
     for (uint8_t i = 0; i < 4; i++) {
       EEPROM.get(EEPROM_POS_A_BASE + i * 2, posADC_A[i]);
       EEPROM.get(EEPROM_POS_B_BASE + i * 2, posADC_B[i]);
     }
-    
+
     for (uint8_t i = 0; i < 4; i++) {
-      if (posADC_A[i] == VALOR_CENTINELA) potDoble.pistaAFallada = true;
-      if (posADC_B[i] == VALOR_CENTINELA) potDoble.pistaBFallada = true;
+      if (posADC_A[i] == VALOR_CENTINELA) {
+        potDoble.pistaAFallada = true;
+      }
+
+      if (posADC_B[i] == VALOR_CENTINELA) {
+        potDoble.pistaBFallada = true;
+      }
     }
-    
+
     if (!potDoble.pistaAFallada) {
       potDoble.pistaActiva = 0;
+
     } else if (!potDoble.pistaBFallada) {
       potDoble.pistaActiva = 1;
+
     } else {
-      logAccion("ERROR: Ambas pistas corruptas en EEPROM");
+      logAccion(F("ERR Pot A+B"));
       entrarErrorGrave();
       return;
     }
-    
+
     avisandoEEPROM = false;
+
   } else {
-    uint16_t defaultsA[4] = {DEFAULT_POS_A_R, DEFAULT_POS_A_N, DEFAULT_POS_A_1, DEFAULT_POS_A_2};
-    uint16_t defaultsB[4] = {DEFAULT_POS_B_R, DEFAULT_POS_B_N, DEFAULT_POS_B_1, DEFAULT_POS_B_2};
-    
+
+    uint16_t defaultsA[4] = {
+      DEFAULT_POS_A_R,
+      DEFAULT_POS_A_N,
+      DEFAULT_POS_A_1,
+      DEFAULT_POS_A_2
+    };
+
+    uint16_t defaultsB[4] = {
+      DEFAULT_POS_B_R,
+      DEFAULT_POS_B_N,
+      DEFAULT_POS_B_1,
+      DEFAULT_POS_B_2
+    };
+
     for (uint8_t i = 0; i < 4; i++) {
       posADC_A[i] = defaultsA[i];
       posADC_B[i] = defaultsB[i];
+
       EEPROM.put(EEPROM_POS_A_BASE + i * 2, posADC_A[i]);
       EEPROM.put(EEPROM_POS_B_BASE + i * 2, posADC_B[i]);
     }
+
     EEPROM.write(EEPROM_FIRMA_ADDR, EEPROM_FIRMA_VAL);
-    
+
     avisandoEEPROM    = true;
     tiempoAvisoEEPROM = millis();
   }
@@ -1110,7 +1132,7 @@ void estadoArranque() {
   moverHacia(posEfectiva(MARCHA_N));
 
   if ((ahora - tiempoInicio) >= TIMEOUT_MS) {
-    logAccion("TIMEOUT movimiento");
+    logAccion(F("TIMEOUT movimiento"));
     entrarErrorGrave();
   }
 }
@@ -1182,7 +1204,7 @@ void iniciarCambioA(Marcha destino) {
 void estadoEsperandoFCC() {
   if (digitalRead(PIN_FC_C) == HIGH) {
     if (millis() - tiempoInicio > TIMEOUT_MS) {
-      logAccion("ERR FC_C");
+      logAccion(F("ERR FC_C"));
       marchaDestino = MARCHA_N;
       tiempoInicio = millis();
       estadoActual = RECUPERANDO_A_N;
@@ -1190,7 +1212,7 @@ void estadoEsperandoFCC() {
     return;
   }
 
-  logFCCambio("FC_C OK");
+  logFCCambio(F("FC_C OK"));
   tiempoInicio = millis();
 
   if (marchaDestino == MARCHA_R) {
@@ -1221,14 +1243,14 @@ void estadoMoviendo() {
     moverHacia(posEfectiva(MARCHA_N));
 
     if (analogRead(PIN_FC_S) < 100) {
-      logFCCambio("FC_S OK");
+      logFCCambio(F("FC_S OK"));
       cambioCarrilPendiente = false;
       tiempoInicio = ahora;
       moverHacia(posEfectiva(MARCHA_R));
     }
 
     if ((ahora - tiempoInicio) >= TIMEOUT_MS) {
-      logAccion("TIMEOUT FC_S");
+      logAccion(F("TIMEOUT FC_S"));
       apagarActuador();
       desactivarK2();
       marchaError = MARCHA_R;
@@ -1262,7 +1284,7 @@ void estadoMoviendo() {
   }
 
   if ((ahora - tiempoInicio) >= TIMEOUT_MS) {
-    logAccion("TIMEOUT movimiento");
+    logAccion(F("TIMEOUT movimiento"));
     apagarActuador();
     desactivarK2();
     marchaError = marchaDestino;
@@ -1275,7 +1297,7 @@ void estadoEsperaFCSRetorno() {
   uint32_t ahora = millis();
 
   if (analogRead(PIN_FC_S) > 900) {
-    logFCCambio("FC_S OK");
+    logFCCambio(F("FC_S OK"));
     desactivarK1();
     marchaActual = MARCHA_N;
     encenderLED(MARCHA_N);
@@ -1287,7 +1309,7 @@ void estadoEsperaFCSRetorno() {
   }
 
   if ((ahora - tiempoAux) >= 1000) {
-    logAccion("ERR FC_S");
+    logAccion(F("ERR FC_S"));
     entrarErrorGrave();
   }
 }
@@ -1308,7 +1330,7 @@ void estadoEmergenciaN() {
   }
 
   if ((ahora - tiempoInicio) >= TIMEOUT_MS) {
-    logAccion("TIMEOUT movimiento");
+    logAccion(F("TIMEOUT movimiento"));
     entrarErrorGrave();
     return;
   }
@@ -1336,7 +1358,7 @@ void estadoRecuperandoN() {
   }
 
   if ((ahora - tiempoInicio) >= TIMEOUT_MS) {
-    logAccion("TIMEOUT movimiento");
+    logAccion(F("TIMEOUT movimiento"));
     apagarActuador();
     desactivarK1();
     desactivarK2();
@@ -1350,31 +1372,30 @@ void estadoErrorLeve() {
   manejarParpadeoSimple(pinLED(marchaError));
 
   if (upDownSimultaneos()) {
-    logAccion("ERROR_LEVE reconocido con UP+DOWN");
-    
     apagarTodosLEDs();
-    
+
     if (marchaActual != MARCHA_N) {
-      logAccion("UP+DOWN en ERROR_LEVE: yendo a N");
-      marchaOrigen = marchaActual;
+      marchaOrigen  = marchaActual;
       marchaDestino = MARCHA_N;
-      tiempoInicio = ahora;
+      tiempoInicio  = ahora;
+
       apagarActuador();
       activarK1();
+
       estadoActual = EMERGENCIA_A_N;
-//      logEstado();
       return;
+
     } else {
       encenderLED(marchaActual);
       estadoActual = REPOSO;
-      logAccion("ERROR_LEVE borrado - en N");
-//      logEstado();
       return;
     }
   }
 
-  if (bloqueoCambio && (ahora - tiempoBloqueo) >= BLOQUEO_MS)
+  if (bloqueoCambio && (ahora - tiempoBloqueo) >= BLOQUEO_MS) {
     bloqueoCambio = false;
+  }
+
   if (bloqueoCambio) return;
 
   Marcha sig = marchaActual;
@@ -1387,6 +1408,7 @@ void estadoErrorLeve() {
       case MARCHA_2:
       default: return;
     }
+
     iniciarCambioA(sig);
     return;
   }
@@ -1399,33 +1421,27 @@ void estadoErrorLeve() {
       case MARCHA_R:
       default: return;
     }
+
     iniciarCambioA(sig);
     return;
   }
 }
 
-void entrarErrorGrave() {
-  apagarTodoReles();
-  apagarTodosLEDs();
-  digitalWrite(PIN_LED_POT_ALERT, HIGH);
-
-  ledEstado    = false;
-  tiempoLed    = millis();
-  estadoActual = ERROR_GRAVE;
-  ambasPistasFalladas = true;
-
-  logAccion("ERROR GRAVE");
+void estadoErrorGrave() {
+  manejarParpadeoGrave();
 }
 
 void entrarErrorGrave() {
   apagarTodoReles();
   apagarTodosLEDs();
   digitalWrite(PIN_LED_POT_ALERT, HIGH);
+
   ledEstado    = false;
   tiempoLed    = millis();
   estadoActual = ERROR_GRAVE;
   ambasPistasFalladas = true;
-  logAccion("ERROR GRAVE");
+
+  logAccion(F("ERROR GRAVE"));
 }
 
 // =============================================================================
@@ -1440,44 +1456,60 @@ void estadoModoAprendizaje() {
 
   if (btnUp.estadoActual && !btnUp.bloqueado &&
       (ahora - btnUp.tiempoPresion) >= TIEMPO_PULSACION_LARGA_MS) {
+
     btnUp.bloqueado = true;
+
     Marcha anterior = marchaAprendizaje;
+
     if      (marchaAprendizaje == MARCHA_2) marchaAprendizaje = MARCHA_1;
     else if (marchaAprendizaje == MARCHA_1) marchaAprendizaje = MARCHA_N;
     else if (marchaAprendizaje == MARCHA_N) marchaAprendizaje = MARCHA_R;
+
     if (marchaAprendizaje != anterior) {
-      logAccion("Navegando a marcha");
-      faseParpadeo  = 0;
-      tiempoLed     = ahora;
-      tiempoInicio  = ahora;
-      estadoActual  = APRENDIZAJE_MOVIENDO;
+      logAccion(F("APR ->"));
+      logCambioMarcha(anterior, marchaAprendizaje);
+
+      faseParpadeo = 0;
+      tiempoLed    = ahora;
+      tiempoInicio = ahora;
+      estadoActual = APRENDIZAJE_MOVIENDO;
       marchaDestino = marchaAprendizaje;
+
       moverHacia(posEfectiva(marchaAprendizaje));
     }
+
     return;
   }
 
   if (btnDown.estadoActual && !btnDown.bloqueado &&
       (ahora - btnDown.tiempoPresion) >= TIEMPO_PULSACION_LARGA_MS) {
+
     btnDown.bloqueado = true;
+
     Marcha anterior = marchaAprendizaje;
+
     if      (marchaAprendizaje == MARCHA_R) marchaAprendizaje = MARCHA_N;
     else if (marchaAprendizaje == MARCHA_N) marchaAprendizaje = MARCHA_1;
     else if (marchaAprendizaje == MARCHA_1) marchaAprendizaje = MARCHA_2;
+
     if (marchaAprendizaje != anterior) {
-      logAccion("Navegando a marcha");
-      faseParpadeo  = 0;
-      tiempoLed     = ahora;
-      tiempoInicio  = ahora;
-      estadoActual  = APRENDIZAJE_MOVIENDO;
+      logAccion(F("APR <-"));
+      logCambioMarcha(anterior, marchaAprendizaje);
+
+      faseParpadeo = 0;
+      tiempoLed    = ahora;
+      tiempoInicio = ahora;
+      estadoActual = APRENDIZAJE_MOVIENDO;
       marchaDestino = marchaAprendizaje;
+
       moverHacia(posEfectiva(marchaAprendizaje));
     }
+
     return;
   }
 
   if (btnUp.presionado) {
-    logAccion("Aprendizaje: paso IN");
+    logAccion(F("APR IN"));
     tiempoInicio  = ahora;
     estadoActual  = APRENDIZAJE_MOVIENDO;
     marchaDestino = MARCHA_R;
@@ -1486,7 +1518,7 @@ void estadoModoAprendizaje() {
   }
 
   if (btnDown.presionado) {
-    logAccion("Aprendizaje: paso OUT");
+    logAccion(F("APR OUT"));
     tiempoInicio  = ahora;
     estadoActual  = APRENDIZAJE_MOVIENDO;
     marchaDestino = MARCHA_2;
@@ -1497,18 +1529,24 @@ void estadoModoAprendizaje() {
   if (btnConf.presionado) {
     uint16_t valA = potDoble.lecturaA;
     uint16_t valB = potDoble.lecturaB;
+
     if (potDoble.pistaAFallada) {
       valA = VALOR_CENTINELA;
     }
+
     if (potDoble.pistaBFallada) {
       valB = VALOR_CENTINELA;
     }
+
     guardarPosEnEEPROM(marchaAprendizaje, valA, valB);
+
     apagarTodosLEDs();
     digitalWrite(pinLED(marchaAprendizaje), HIGH);
+
     tiempoAux    = ahora;
     estadoActual = APRENDIZAJE_CONFIRMANDO;
-    logAccion("Posicion guardada en EEPROM");
+
+    logAccion(F("EEP SAVE"));
   }
 }
 
@@ -1531,23 +1569,28 @@ void estadoAprendizajeMoviendo() {
   bool esNavegacion = (marchaDestino == marchaAprendizaje);
 
   if (esNavegacion) {
+
     if (enPosicion(posEfectiva(marchaAprendizaje))) {
       apagarActuador();
       logPosicionAlcanzada(marchaAprendizaje);
       estadoActual = MODO_APRENDIZAJE;
       return;
     }
+
     if ((ahora - tiempoInicio) >= TIMEOUT_MS) {
       apagarActuador();
-      logAccion("Aprendizaje: timeout navegacion");
+      logAccion(F("TIMEOUT movimiento"));
       estadoActual = MODO_APRENDIZAJE;
       return;
     }
+
     moverHacia(posEfectiva(marchaAprendizaje));
+
   } else {
+
     if ((ahora - tiempoInicio) >= PASO_APRENDIZAJE_MS) {
       apagarActuador();
-      logAccion("Aprendizaje: paso fin");
+      logAccion(F("APR FIN"));
       estadoActual = MODO_APRENDIZAJE;
     }
   }
