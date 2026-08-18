@@ -21,11 +21,14 @@ const uint16_t PASO_APRENDIZAJE_MS       = 100;
 // --- Redundancia de potenciómetro ---
 const uint16_t RANGO_MIN_ADC             = 10;
 const uint16_t RANGO_MAX_ADC             = 1013;
-const uint16_t TIEMPO_VERIFICACION_POT   = 150;    // <--- CAMBIADO: 100 -> 200ms
-const uint8_t  NUM_MUESTRAS_PROMEDIO     = 5;      // <--- CAMBIADO: 3 -> 5 (más filtrado)
-const uint16_t UMBRAL_SALTO_ERRATICO     = 120;    // <--- CAMBIADO: 100 -> 150
+const uint16_t TIEMPO_VERIFICACION_POT   = 150;
+const uint8_t  NUM_MUESTRAS_PROMEDIO     = 5;
+const uint16_t UMBRAL_SALTO_ERRATICO     = 120;
 const uint16_t UMBRAL_CONGELADO          = 3;
-const uint8_t  LECTURAS_CONGELADO        = 8;      // <--- CAMBIADO: 5 -> 8
+const uint8_t  LECTURAS_CONGELADO        = 8;
+const uint8_t  LECTURAS_CONFIRMACION_FALLO = 3;
+const uint8_t  LECTURAS_CONFIRMACION_RANGO = 2;
+const uint8_t  LECTURAS_CONFIRMACION_DISCREPANCIA = 3;
 const uint16_t VALOR_CENTINELA           = 0xFFFF;
 
 // --- Patrones de parpadeo ---
@@ -107,6 +110,16 @@ enum Marcha {
   MARCHA_2 = 3
 };
 
+enum PotFallo {
+  POT_FALLO_NINGUNO,
+  POT_FALLO_FUERA_RANGO,
+  POT_FALLO_SALTO_ERRATICO,
+  POT_FALLO_CONGELADA,
+  POT_FALLO_DIRECCION,
+  POT_FALLO_DISCREPANCIA,
+  POT_FALLO_EEPROM
+};
+
 enum Estado {
   ARRANQUE,
   REPOSO,
@@ -141,15 +154,26 @@ struct PotenciometroDoble {
   uint16_t lecturaA;
   uint16_t lecturaB;
   uint16_t lecturaEfectiva;
+
   bool     pistaAFallada;
   bool     pistaBFallada;
   uint8_t  pistaActiva;
+
   uint32_t ultimoCambioPista;
   uint32_t ultimaVerificacion;
+
   uint8_t  contadorCongeladoA;
   uint8_t  contadorCongeladoB;
+
+  uint8_t  contadorFalloA;
+  uint8_t  contadorFalloB;
+
   uint16_t lecturaAnteriorA;
   uint16_t lecturaAnteriorB;
+
+  PotFallo motivoFalloA;
+  PotFallo motivoFalloB;
+
   bool     primeraLectura;
 };
 
@@ -200,13 +224,23 @@ PotenciometroDoble potDoble = {
   0, 0, 0,
   false, false,
   0, 0, 0,
-  0, 0, 0, 0,
+  0, 0,
+  0, 0,
+  0, 0,
+  POT_FALLO_NINGUNO,
+  POT_FALLO_NINGUNO,
   true
 };
 
 bool potAlertState = false;
 uint32_t tiempoPotAlert = 0;
 bool ambasPistasFalladas = false;
+
+// Máscara de posiciones recalibradas durante el aprendizaje.
+// Bit 0=R, bit 1=N, bit 2=1, bit 3=2.
+uint8_t posicionesRecalibradasA = 0;
+uint8_t posicionesRecalibradasB = 0;
+uint8_t contadorDiscrepanciaPistas = 0;
 
 // =============================================================================
 // PROTOTIPOS
@@ -228,6 +262,10 @@ void apagarTodoReles();
 void leerPotenciometro();
 uint16_t promediarLecturas(uint8_t pin);
 bool validarLectura(uint16_t val);
+const __FlashStringHelper* nombreFalloPot(PotFallo fallo);
+void registrarFalloPista(uint8_t pista, PotFallo motivo);
+void confirmarFalloPista(uint8_t pista, PotFallo motivo, bool fueraRango);
+void recuperarPistaTrasRecalibracion(uint8_t pista);
 uint16_t umbralDiferenciaPistas(Marcha m);
 bool verificarPistas();
 uint16_t posEfectiva(Marcha m);
@@ -305,8 +343,11 @@ void setup() {
 
   printDiagnosticoInicial();
 
-  estadoActual = ARRANQUE;
   tiempoInicio = millis();
+
+  if (estadoActual != ERROR_GRAVE) {
+    estadoActual = ARRANQUE;
+  }
 }
 
 // =============================================================================
@@ -343,6 +384,8 @@ void loop() {
     estadoActual      = MODO_APRENDIZAJE;
     marchaAprendizaje = MARCHA_N;
     faseParpadeo      = 0;
+    posicionesRecalibradasA = 0;
+    posicionesRecalibradasB = 0;
     contadorDestellos = 0;
     tiempoLed         = ahora;
     if (!enPosicion(posEfectiva(MARCHA_N))) {
@@ -383,7 +426,28 @@ void loop() {
 // =============================================================================
 
 uint16_t posEfectiva(Marcha m) {
-  return (potDoble.pistaActiva == 0) ? posADC_A[m] : posADC_B[m];
+  if (!potDoble.pistaAFallada &&
+      potDoble.pistaActiva == 0) {
+    return posADC_A[m];
+  }
+
+  if (!potDoble.pistaBFallada &&
+      potDoble.pistaActiva == 1) {
+    return posADC_B[m];
+  }
+
+  if (!potDoble.pistaAFallada) {
+    potDoble.pistaActiva = 0;
+    return posADC_A[m];
+  }
+
+  if (!potDoble.pistaBFallada) {
+    potDoble.pistaActiva = 1;
+    return posADC_B[m];
+  }
+
+  // No existe una referencia de posición fiable.
+  return 0;
 }
 
 // =============================================================================
@@ -557,27 +621,132 @@ void logAccion(const __FlashStringHelper* accion) {
 // =============================================================================
 
 void procesarComandoSerial() {
-  if (Serial.available()) {
-    char c = Serial.read();
 
-    if (c == 'R' || c == 'r') {
-      logAccion(F("RESET Pot"));
+  if (!Serial.available()) {
+    return;
+  }
 
-      potDoble.pistaAFallada = false;
-      potDoble.pistaBFallada = false;
-      potDoble.contadorCongeladoA = 0;
-      potDoble.contadorCongeladoB = 0;
-      ambasPistasFalladas = false;
+  char c = Serial.read();
 
-      digitalWrite(PIN_LED_POT_ALERT, LOW);
-      potAlertState = false;
+  // ---------------------------------------------------------------------------
+  // D = diagnóstico completo del potenciómetro
+  // ---------------------------------------------------------------------------
 
-      leerPotenciometro();
-      verificarPistas();
-      potDoble.lecturaEfectiva = obtenerLecturaSegura();
+  if (c == 'D' || c == 'd') {
 
-      DBGLN(F("Pot reset"));
+    DBGLN(F(""));
+    DBGLN(F("=== DIAGNOSTICO POTENCIOMETRO ==="));
+
+    DBG(F("A: "));
+    if (potDoble.pistaAFallada) {
+      DBG(F("FALLADA  Motivo: "));
+      DBGLN_VAL(nombreFalloPot(potDoble.motivoFalloA));
+    } else {
+      DBGLN(F("OK"));
     }
+
+    DBG(F("  ADC actual: "));
+    DBGLN_VAL(potDoble.lecturaA);
+
+    DBG(F("  ADC anterior: "));
+    DBGLN_VAL(potDoble.lecturaAnteriorA);
+
+    DBG(F("  Contador fallo: "));
+    DBGLN_VAL(potDoble.contadorFalloA);
+
+    DBG(F("  Congelada: "));
+    DBGLN_VAL(potDoble.contadorCongeladoA);
+
+
+    DBG(F("B: "));
+    if (potDoble.pistaBFallada) {
+      DBG(F("FALLADA  Motivo: "));
+      DBGLN_VAL(nombreFalloPot(potDoble.motivoFalloB));
+    } else {
+      DBGLN(F("OK"));
+    }
+
+    DBG(F("  ADC actual: "));
+    DBGLN_VAL(potDoble.lecturaB);
+
+    DBG(F("  ADC anterior: "));
+    DBGLN_VAL(potDoble.lecturaAnteriorB);
+
+    DBG(F("  Contador fallo: "));
+    DBGLN_VAL(potDoble.contadorFalloB);
+
+    DBG(F("  Congelada: "));
+    DBGLN_VAL(potDoble.contadorCongeladoB);
+
+
+    DBG(F("Pista activa: "));
+    DBGLN_VAL(
+        potDoble.pistaActiva == 0
+          ? F("A")
+          : F("B")
+    );
+
+    DBG(F("Estado pot: "));
+
+    if (potDoble.pistaAFallada &&
+        potDoble.pistaBFallada) {
+
+      DBGLN(F("AMBAS FALLADAS"));
+
+    } else if (potDoble.pistaAFallada ||
+               potDoble.pistaBFallada) {
+
+      DBGLN(F("UNA PISTA FALLADA"));
+
+    } else {
+
+      DBGLN(F("OK"));
+    }
+
+    DBG(F("Diferencia A/B: "));
+    DBGLN_VAL(
+        abs(
+          (int)potDoble.lecturaA -
+          (int)potDoble.lecturaB
+        )
+    );
+
+    DBG(F("Umbral A/B: "));
+    DBGLN_VAL(
+        umbralDiferenciaPistas(marchaActual)
+    );
+
+    DBG(F("Discrepancias confirmadas: "));
+    DBGLN_VAL(contadorDiscrepanciaPistas);
+
+    DBGLN(F("================================="));
+    DBGLN(F(""));
+  }
+
+  // ---------------------------------------------------------------------------
+  // R = reiniciar únicamente contadores transitorios.
+  //
+  // Una pista ya declarada fallada NO se recupera mediante este comando.
+  // ---------------------------------------------------------------------------
+
+  if (c == 'R' || c == 'r') {
+
+    potDoble.contadorFalloA = 0;
+    potDoble.contadorFalloB = 0;
+
+    potDoble.contadorCongeladoA = 0;
+    potDoble.contadorCongeladoB = 0;
+
+    contadorDiscrepanciaPistas = 0;
+
+    leerPotenciometro();
+
+    potDoble.lecturaEfectiva =
+        obtenerLecturaSegura();
+
+    logAccion(
+        F("RESET diagnostico: fallos latched NO borrados")
+    );
   }
 }
 
@@ -743,11 +912,73 @@ bool validarLectura(uint16_t val) {
   return (val >= RANGO_MIN_ADC && val <= RANGO_MAX_ADC);
 }
 
+const __FlashStringHelper* nombreFalloPot(PotFallo fallo) {
+  switch (fallo) {
+    case POT_FALLO_NINGUNO:
+      return F("NINGUNO");
+
+    case POT_FALLO_FUERA_RANGO:
+      return F("FUERA_DE_RANGO");
+
+    case POT_FALLO_SALTO_ERRATICO:
+      return F("SALTO_ERRATICO");
+
+    case POT_FALLO_CONGELADA:
+      return F("CONGELADA");
+
+    case POT_FALLO_DIRECCION:
+      return F("DIRECCION_INCORRECTA");
+
+    case POT_FALLO_DISCREPANCIA:
+      return F("DISCREPANCIA");
+
+    case POT_FALLO_EEPROM:
+      return F("DESHABILITADA_EEPROM");
+  }
+
+  return F("DESCONOCIDO");
+}
+
+void registrarFalloPista(uint8_t pista, PotFallo motivo) {
+
+  if (pista == 0) {
+
+    if (potDoble.pistaAFallada) return;
+
+    potDoble.pistaAFallada = true;
+    potDoble.motivoFalloA = motivo;
+    potDoble.contadorFalloA = 0;
+
+    DBG(F("ERR Pot A: "));
+    DBGLN_VAL(nombreFalloPot(motivo));
+
+  } else {
+
+    if (potDoble.pistaBFallada) return;
+
+    potDoble.pistaBFallada = true;
+    potDoble.motivoFalloB = motivo;
+    potDoble.contadorFalloB = 0;
+
+    DBG(F("ERR Pot B: "));
+    DBGLN_VAL(nombreFalloPot(motivo));
+  }
+}
+
 uint16_t umbralDiferenciaPistas(Marcha m) {
-  int16_t diffBase = abs((int)posADC_A[m] - (int)posADC_B[m]);
-  // Con diferencias reales de 4-7, el umbral debe ser ajustado
-  uint16_t umbral = (uint16_t)((float)diffBase * 2.5) + 15;  // Factor 2.5, margen 15
-  if (umbral < 25) umbral = 25;  // Mínimo absoluto
+  uint16_t diffBase =
+      (uint16_t)abs((int)posADC_A[m] - (int)posADC_B[m]);
+
+  // Equivale aproximadamente a:
+  // diffBase * 2.5 + 15
+  // sin utilizar float.
+  uint16_t umbral =
+      (uint16_t)(((uint32_t)diffBase * 5UL) / 2UL) + 15U;
+
+  if (umbral < 25) {
+    umbral = 25;
+  }
+
   return umbral;
 }
 
@@ -755,128 +986,324 @@ bool verificarPistas() {
   uint16_t valA = potDoble.lecturaA;
   uint16_t valB = potDoble.lecturaB;
 
-  bool validaA = validarLectura(valA);
-  bool validaB = validarLectura(valB);
+  bool primeraLectura = potDoble.primeraLectura;
+  bool moviendo = relInActivo || relOutActivo;
 
-  bool diffOk = true;
+  int16_t deltaA = 0;
+  int16_t deltaB = 0;
 
-  if (validaA && validaB) {
+  if (!primeraLectura) {
+    deltaA = (int16_t)valA - (int16_t)potDoble.lecturaAnteriorA;
+    deltaB = (int16_t)valB - (int16_t)potDoble.lecturaAnteriorB;
+  }
+
+  // ---------------------------------------------------------------------------
+  // 1. VALIDACIÓN INDIVIDUAL DE CADA PISTA
+  // ---------------------------------------------------------------------------
+
+  bool fueraRangoA = !validarLectura(valA);
+  bool fueraRangoB = !validarLectura(valB);
+
+  bool saltoA = false;
+  bool saltoB = false;
+
+  bool direccionIncorrectaA = false;
+  bool direccionIncorrectaB = false;
+
+  bool congeladaA = false;
+  bool congeladaB = false;
+
+  if (!primeraLectura) {
+
+    saltoA = (abs((int)deltaA) > UMBRAL_SALTO_ERRATICO);
+    saltoB = (abs((int)deltaB) > UMBRAL_SALTO_ERRATICO);
+
+    if (moviendo) {
+
+      if (abs((int)deltaA) < UMBRAL_CONGELADO) {
+        potDoble.contadorCongeladoA++;
+      } else {
+        potDoble.contadorCongeladoA = 0;
+      }
+
+      if (abs((int)deltaB) < UMBRAL_CONGELADO) {
+        potDoble.contadorCongeladoB++;
+      } else {
+        potDoble.contadorCongeladoB = 0;
+      }
+
+      congeladaA =
+          potDoble.contadorCongeladoA >= LECTURAS_CONGELADO;
+
+      congeladaB =
+          potDoble.contadorCongeladoB >= LECTURAS_CONGELADO;
+
+      if (relInActivo) {
+        if (deltaA > 5) direccionIncorrectaA = true;
+        if (deltaB > 5) direccionIncorrectaB = true;
+
+      } else if (relOutActivo) {
+        if (deltaA < -5) direccionIncorrectaA = true;
+        if (deltaB < -5) direccionIncorrectaB = true;
+      }
+
+    } else {
+      potDoble.contadorCongeladoA = 0;
+      potDoble.contadorCongeladoB = 0;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // 2. DETERMINAR SI UNA PISTA TIENE UN FALLO INDIVIDUAL
+  // ---------------------------------------------------------------------------
+
+  bool falloActualA =
+      fueraRangoA ||
+      saltoA ||
+      congeladaA ||
+      direccionIncorrectaA;
+
+  bool falloActualB =
+      fueraRangoB ||
+      saltoB ||
+      congeladaB ||
+      direccionIncorrectaB;
+
+  PotFallo motivoA = POT_FALLO_NINGUNO;
+  PotFallo motivoB = POT_FALLO_NINGUNO;
+
+  if (fueraRangoA) {
+    motivoA = POT_FALLO_FUERA_RANGO;
+  } else if (saltoA) {
+    motivoA = POT_FALLO_SALTO_ERRATICO;
+  } else if (congeladaA) {
+    motivoA = POT_FALLO_CONGELADA;
+  } else if (direccionIncorrectaA) {
+    motivoA = POT_FALLO_DIRECCION;
+  }
+
+  if (fueraRangoB) {
+    motivoB = POT_FALLO_FUERA_RANGO;
+  } else if (saltoB) {
+    motivoB = POT_FALLO_SALTO_ERRATICO;
+  } else if (congeladaB) {
+    motivoB = POT_FALLO_CONGELADA;
+  } else if (direccionIncorrectaB) {
+    motivoB = POT_FALLO_DIRECCION;
+  }
+
+  // ---------------------------------------------------------------------------
+  // 3. DISCREPANCIA A/B
+  //
+  // Solo se analiza como discrepancia si ambas pistas son individualmente
+  // plausibles. Si una ya presenta un fallo identificable, no culpamos a la
+  // otra simplemente porque sus valores sean diferentes.
+  // ---------------------------------------------------------------------------
+
+  bool discrepancia = false;
+  bool culpableA = false;
+  bool culpableB = false;
+
+  if (!primeraLectura &&
+      !fueraRangoA &&
+      !fueraRangoB &&
+      !potDoble.pistaAFallada &&
+      !potDoble.pistaBFallada) {
+
     int diff = abs((int)valA - (int)valB);
     uint16_t umbral = umbralDiferenciaPistas(marchaActual);
 
     if (diff > umbral) {
-      diffOk = false;
-    }
-  }
+      discrepancia = true;
 
-  bool moviendo = relInActivo || relOutActivo;
+      // Si una pista tiene un comportamiento claramente incorrecto,
+      // podemos identificarla.
+      culpableA =
+          saltoA ||
+          direccionIncorrectaA ||
+          congeladaA;
 
-  if (moviendo) {
-    if (abs((int)valA - (int)potDoble.lecturaAnteriorA) < UMBRAL_CONGELADO) {
-      potDoble.contadorCongeladoA++;
+      culpableB =
+          saltoB ||
+          direccionIncorrectaB ||
+          congeladaB;
+
+      if (culpableA && !culpableB) {
+        falloActualA = true;
+        motivoA = saltoA
+                    ? POT_FALLO_SALTO_ERRATICO
+                    : direccionIncorrectaA
+                        ? POT_FALLO_DIRECCION
+                        : POT_FALLO_CONGELADA;
+
+        potDoble.contadorFalloB = 0;
+
+      } else if (culpableB && !culpableA) {
+        falloActualB = true;
+        motivoB = saltoB
+                    ? POT_FALLO_SALTO_ERRATICO
+                    : direccionIncorrectaB
+                        ? POT_FALLO_DIRECCION
+                        : POT_FALLO_CONGELADA;
+
+        potDoble.contadorFalloA = 0;
+
+      } else if (!culpableA && !culpableB) {
+
+        // No podemos saber cuál es la mala.
+        // No deshabilitamos ninguna todavía.
+
+        contadorDiscrepanciaPistas++;
+        
+        if (contadorDiscrepanciaPistas >=
+           LECTURAS_CONFIRMACION_DISCREPANCIA) {
+
+          potDoble.pistaAFallada = true;
+          potDoble.pistaBFallada = true;
+
+          potDoble.motivoFalloA = POT_FALLO_DISCREPANCIA;
+          potDoble.motivoFalloB = POT_FALLO_DISCREPANCIA;
+
+          potDoble.contadorFalloA = 0;
+          potDoble.contadorFalloB = 0;
+
+          ambasPistasFalladas = true;
+
+          logAccion(F("ERR Pot A+B: DISCREPANCIA"));
+
+          if (estadoActual != ERROR_GRAVE) {
+            entrarErrorGrave();
+          }
+        }
+
+      } else {
+        // Ambas presentan comportamiento incompatible.
+        falloActualA = true;
+        falloActualB = true;
+
+        if (motivoA == POT_FALLO_NINGUNO) {
+          motivoA = POT_FALLO_DISCREPANCIA;
+        }
+
+        if (motivoB == POT_FALLO_NINGUNO) {
+          motivoB = POT_FALLO_DISCREPANCIA;
+        }
+      }
+
     } else {
-      potDoble.contadorCongeladoA = 0;
-    }
-
-    if (potDoble.contadorCongeladoA >= LECTURAS_CONGELADO) {
-      validaA = false;
-    }
-
-    if (abs((int)valB - (int)potDoble.lecturaAnteriorB) < UMBRAL_CONGELADO) {
-      potDoble.contadorCongeladoB++;
-    } else {
-      potDoble.contadorCongeladoB = 0;
-    }
-
-    if (potDoble.contadorCongeladoB >= LECTURAS_CONGELADO) {
-      validaB = false;
-    }
-
-  } else {
-    potDoble.contadorCongeladoA = 0;
-    potDoble.contadorCongeladoB = 0;
-  }
-
-  if (!potDoble.primeraLectura) {
-    if (abs((int)valA - (int)potDoble.lecturaAnteriorA) > UMBRAL_SALTO_ERRATICO) {
-      validaA = false;
-    }
-
-    if (abs((int)valB - (int)potDoble.lecturaAnteriorB) > UMBRAL_SALTO_ERRATICO) {
-      validaB = false;
+      // La discrepancia ha desaparecido.
+      // No recuperamos ninguna pista que ya estuviera bloqueada.
+      contadorDiscrepanciaPistas = 0;
     }
   }
 
-  potDoble.primeraLectura = false;
+  // ---------------------------------------------------------------------------
+  // 4. CONFIRMACIÓN DE FALLOS INDIVIDUALES
+  // ---------------------------------------------------------------------------
 
-  if (moviendo) {
-    if (relInActivo) {
-      if (valA > potDoble.lecturaAnteriorA + 5) validaA = false;
-      if (valB > potDoble.lecturaAnteriorB + 5) validaB = false;
+  if (!potDoble.pistaAFallada && falloActualA) {
 
-    } else if (relOutActivo) {
-      if (valA < potDoble.lecturaAnteriorA - 5) validaA = false;
-      if (valB < potDoble.lecturaAnteriorB - 5) validaB = false;
+    potDoble.contadorFalloA++;
+
+    uint8_t limite =
+        fueraRangoA
+          ? LECTURAS_CONFIRMACION_RANGO
+          : LECTURAS_CONFIRMACION_FALLO;
+
+    if (congeladaA) {
+      limite = 1;
     }
+
+    if (potDoble.contadorFalloA >= limite) {
+      registrarFalloPista(0, motivoA);
+    }
+
+  } else if (!falloActualA) {
+    potDoble.contadorFalloA = 0;
   }
+
+  if (!potDoble.pistaBFallada && falloActualB) {
+
+    potDoble.contadorFalloB++;
+
+    uint8_t limite =
+        fueraRangoB
+          ? LECTURAS_CONFIRMACION_RANGO
+          : LECTURAS_CONFIRMACION_FALLO;
+
+    if (congeladaB) {
+      limite = 1;
+    }
+
+    if (potDoble.contadorFalloB >= limite) {
+      registrarFalloPista(1, motivoB);
+    }
+
+  } else if (!falloActualB) {
+    potDoble.contadorFalloB = 0;
+  }
+
+  // ---------------------------------------------------------------------------
+  // 5. GUARDAR LECTURAS ANTERIORES
+  // ---------------------------------------------------------------------------
 
   potDoble.lecturaAnteriorA = valA;
   potDoble.lecturaAnteriorB = valB;
+  potDoble.primeraLectura = false;
 
-  if (!validaA || !diffOk) {
-    if (!potDoble.pistaAFallada) {
-      potDoble.pistaAFallada = true;
-      logAccion(F("ERR Pot A"));
-    }
-  } else {
-    potDoble.pistaAFallada = false;
-  }
-
-  if (!validaB || !diffOk) {
-    if (!potDoble.pistaBFallada) {
-      potDoble.pistaBFallada = true;
-      logAccion(F("ERR Pot B"));
-    }
-  } else {
-    potDoble.pistaBFallada = false;
-  }
+  // ---------------------------------------------------------------------------
+  // 6. ACTUALIZAR ESTADO GLOBAL
+  // ---------------------------------------------------------------------------
 
   ambasPistasFalladas =
       potDoble.pistaAFallada &&
       potDoble.pistaBFallada;
 
   if (ambasPistasFalladas) {
-    logAccion(F("ERR Pot A+B"));
 
     if (estadoActual != ERROR_GRAVE) {
+      logAccion(F("ERR Pot A+B"));
       entrarErrorGrave();
     }
+
+    return false;
   }
 
-  if (potDoble.pistaActiva == 0 && potDoble.pistaAFallada) {
-    if (!potDoble.pistaBFallada) {
-      potDoble.pistaActiva = 1;
-      potDoble.ultimoCambioPista = millis();
-      logAccion(F("Pot Act:B"));
-    }
+  // ---------------------------------------------------------------------------
+  // 7. CONMUTACIÓN DE PISTA
+  //
+  // Una pista que ha fallado queda bloqueada y NO se recupera aquí.
+  // ---------------------------------------------------------------------------
 
-  } else if (potDoble.pistaActiva == 1 && potDoble.pistaBFallada) {
-    if (!potDoble.pistaAFallada) {
-      potDoble.pistaActiva = 0;
-      potDoble.ultimoCambioPista = millis();
-      logAccion(F("Pot Act:A"));
-    }
+  if (potDoble.pistaActiva == 0 &&
+      potDoble.pistaAFallada &&
+      !potDoble.pistaBFallada) {
+
+    potDoble.pistaActiva = 1;
+    potDoble.ultimoCambioPista = millis();
+    logAccion(F("Pot Act:B"));
+
+  } else if (potDoble.pistaActiva == 1 &&
+             potDoble.pistaBFallada &&
+             !potDoble.pistaAFallada) {
+
+    potDoble.pistaActiva = 0;
+    potDoble.ultimoCambioPista = millis();
+    logAccion(F("Pot Act:A"));
   }
 
-  return !ambasPistasFalladas;
+  return true;
 }
 
 uint16_t obtenerLecturaSegura() {
-  if (potDoble.pistaActiva == 0 && !potDoble.pistaAFallada) {
+
+  if (potDoble.pistaActiva == 0 &&
+      !potDoble.pistaAFallada) {
     return potDoble.lecturaA;
   }
 
-  if (potDoble.pistaActiva == 1 && !potDoble.pistaBFallada) {
+  if (potDoble.pistaActiva == 1 &&
+      !potDoble.pistaBFallada) {
     return potDoble.lecturaB;
   }
 
@@ -890,12 +1317,10 @@ uint16_t obtenerLecturaSegura() {
     return potDoble.lecturaB;
   }
 
-  if (potDoble.lecturaEfectiva > 0 &&
-      potDoble.lecturaEfectiva < 1024) {
-    return potDoble.lecturaEfectiva;
-  }
-
-  return posEfectiva(MARCHA_N);
+  // Ambas pistas no son fiables.
+  // No devolvemos una lectura antigua porque podría provocar
+  // un movimiento basándose en una posición inexistente.
+  return 0;
 }
 
 uint16_t leerPot() {
@@ -912,6 +1337,13 @@ bool enPosicion(uint16_t pos) {
 }
 
 void moverHacia(uint16_t pos) {
+
+  // Sin referencia válida de posición no se permite ningún movimiento.
+  if (ambasPistasFalladas || pos == 0) {
+    apagarActuador();
+    return;
+  }
+
   if (enPosicion(pos)) {
     apagarActuador();
     return;
@@ -939,15 +1371,28 @@ void cargarPosiciones() {
       EEPROM.get(EEPROM_POS_B_BASE + i * 2, posADC_B[i]);
     }
 
+    potDoble.pistaAFallada = false;
+    potDoble.pistaBFallada = false;
+
+    potDoble.motivoFalloA = POT_FALLO_NINGUNO;
+    potDoble.motivoFalloB = POT_FALLO_NINGUNO;
+
     for (uint8_t i = 0; i < 4; i++) {
+
       if (posADC_A[i] == VALOR_CENTINELA) {
         potDoble.pistaAFallada = true;
+        potDoble.motivoFalloA = POT_FALLO_EEPROM;
       }
 
       if (posADC_B[i] == VALOR_CENTINELA) {
         potDoble.pistaBFallada = true;
+        potDoble.motivoFalloB = POT_FALLO_EEPROM;
       }
     }
+
+    ambasPistasFalladas =
+        potDoble.pistaAFallada &&
+        potDoble.pistaBFallada;
 
     if (!potDoble.pistaAFallada) {
       potDoble.pistaActiva = 0;
@@ -956,7 +1401,7 @@ void cargarPosiciones() {
       potDoble.pistaActiva = 1;
 
     } else {
-      logAccion(F("ERR Pot A+B"));
+      logAccion(F("ERR Pot A+B EEPROM"));
       entrarErrorGrave();
       return;
     }
@@ -995,20 +1440,76 @@ void cargarPosiciones() {
 }
 
 void guardarPosEnEEPROM(Marcha m, uint16_t valorA, uint16_t valorB) {
+
+  if (!validarLectura(valorA) ||
+      !validarLectura(valorB)) {
+
+    logAccion(F("EEP SAVE RECHAZADO: ADC INVALIDO"));
+    return;
+  }
+
   posADC_A[m] = valorA;
   posADC_B[m] = valorB;
-  
+
   EEPROM.put(EEPROM_POS_A_BASE + m * 2, valorA);
   EEPROM.put(EEPROM_POS_B_BASE + m * 2, valorB);
   EEPROM.write(EEPROM_FIRMA_ADDR, EEPROM_FIRMA_VAL);
-  
-  if (potDoble.pistaAFallada) {
-    EEPROM.put(EEPROM_POS_A_BASE + m * 2, (uint16_t)VALOR_CENTINELA);
-    posADC_A[m] = VALOR_CENTINELA;
+
+  posicionesRecalibradasA |= (1 << m);
+  posicionesRecalibradasB |= (1 << m);
+
+  // Una pista fallada solo puede recuperarse después de recalibrar
+  // explícitamente las cuatro posiciones.
+  if (posicionesRecalibradasA == 0x0F) {
+    recuperarPistaTrasRecalibracion(0);
   }
-  if (potDoble.pistaBFallada) {
-    EEPROM.put(EEPROM_POS_B_BASE + m * 2, (uint16_t)VALOR_CENTINELA);
-    posADC_B[m] = VALOR_CENTINELA;
+
+  if (posicionesRecalibradasB == 0x0F) {
+    recuperarPistaTrasRecalibracion(1);
+  }
+}
+
+void recuperarPistaTrasRecalibracion(uint8_t pista) {
+
+  if (pista == 0) {
+
+    if (!potDoble.pistaAFallada) return;
+
+    potDoble.pistaAFallada = false;
+    potDoble.motivoFalloA = POT_FALLO_NINGUNO;
+    potDoble.contadorFalloA = 0;
+    potDoble.contadorCongeladoA = 0;
+
+    logAccion(F("Pot A RECUPERADA POR CALIBRACION"));
+
+  } else {
+
+    if (!potDoble.pistaBFallada) return;
+
+    potDoble.pistaBFallada = false;
+    potDoble.motivoFalloB = POT_FALLO_NINGUNO;
+    potDoble.contadorFalloB = 0;
+    potDoble.contadorCongeladoB = 0;
+
+    logAccion(F("Pot B RECUPERADA POR CALIBRACION"));
+  }
+
+  ambasPistasFalladas =
+      potDoble.pistaAFallada &&
+      potDoble.pistaBFallada;
+
+  if (!ambasPistasFalladas) {
+
+    if (potDoble.pistaActiva == 0 &&
+        potDoble.pistaAFallada) {
+
+      potDoble.pistaActiva = 1;
+
+    } else if (potDoble.pistaActiva == 1 &&
+               potDoble.pistaBFallada) {
+
+      potDoble.pistaActiva = 0;
+    }
   }
 }
 
@@ -1085,23 +1586,39 @@ void manejarParpadeoGrave() {
 
 void manejarParpadeoPotAlert() {
   uint32_t ahora = millis();
-  
-  if (ambasPistasFalladas) {
+
+  // A4 pertenece exclusivamente al diagnóstico del potenciómetro.
+
+  if (potDoble.pistaAFallada &&
+      potDoble.pistaBFallada) {
+
     digitalWrite(PIN_LED_POT_ALERT, HIGH);
+    potAlertState = true;
     return;
   }
-  
-  if (potDoble.pistaAFallada || potDoble.pistaBFallada) {
-    uint16_t intervalo = potAlertState ? PARPADEO_POT_ALERT_ON : PARPADEO_POT_ALERT_OFF;
+
+  if (potDoble.pistaAFallada ||
+      potDoble.pistaBFallada) {
+
+    uint16_t intervalo =
+        potAlertState
+          ? PARPADEO_POT_ALERT_ON
+          : PARPADEO_POT_ALERT_OFF;
+
     if ((ahora - tiempoPotAlert) >= intervalo) {
       potAlertState = !potAlertState;
-      digitalWrite(PIN_LED_POT_ALERT, potAlertState ? HIGH : LOW);
+      digitalWrite(
+          PIN_LED_POT_ALERT,
+          potAlertState ? HIGH : LOW
+      );
       tiempoPotAlert = ahora;
     }
-  } else {
-    digitalWrite(PIN_LED_POT_ALERT, LOW);
-    potAlertState = false;
+
+    return;
   }
+
+  digitalWrite(PIN_LED_POT_ALERT, LOW);
+  potAlertState = false;
 }
 // =============================================================================
 // ESTADOS
@@ -1506,12 +2023,10 @@ void estadoErrorGrave() {
 void entrarErrorGrave() {
   apagarTodoReles();
   apagarTodosLEDs();
-  digitalWrite(PIN_LED_POT_ALERT, HIGH);
 
   ledEstado    = false;
   tiempoLed    = millis();
   estadoActual = ERROR_GRAVE;
-  ambasPistasFalladas = true;
 
   logAccion(F("ERROR GRAVE"));
 }
@@ -1598,28 +2113,34 @@ void estadoModoAprendizaje() {
     return;
   }
 
-  if (btnConf.presionado) {
-    uint16_t valA = potDoble.lecturaA;
-    uint16_t valB = potDoble.lecturaB;
+ if (btnConf.presionado) {
 
-    if (potDoble.pistaAFallada) {
-      valA = VALOR_CENTINELA;
-    }
+  uint16_t valA = potDoble.lecturaA;
+  uint16_t valB = potDoble.lecturaB;
 
-    if (potDoble.pistaBFallada) {
-      valB = VALOR_CENTINELA;
-    }
+  // Una calibración explícita solo puede guardar valores ADC válidos.
+  if (!validarLectura(valA) ||
+      !validarLectura(valB)) {
 
-    guardarPosEnEEPROM(marchaAprendizaje, valA, valB);
-
-    apagarTodosLEDs();
-    digitalWrite(pinLED(marchaAprendizaje), HIGH);
-
-    tiempoAux    = ahora;
-    estadoActual = APRENDIZAJE_CONFIRMANDO;
-
-    logAccion(F("EEP SAVE"));
+    logAccion(F("EEP SAVE RECHAZADO: ADC INVALIDO"));
+    return;
   }
+
+  guardarPosEnEEPROM(
+      marchaAprendizaje,
+      valA,
+      valB
+  );
+
+  apagarTodosLEDs();
+  digitalWrite(pinLED(marchaAprendizaje), HIGH);
+
+  tiempoAux    = ahora;
+  estadoActual = APRENDIZAJE_CONFIRMANDO;
+
+  logAccion(F("EEP SAVE"));
+  return;
+}
 }
 
 void estadoAprendizajeConfirmando() {
