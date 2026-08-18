@@ -1,6 +1,6 @@
 // =============================================================================
 // SELECTOR DE MARCHAS VW AUTOSTICK — CON REDUNDANCIA DE POTENCIÓMETRO
-// Versión 4.2 — Código completo y estable
+// Versión 7.3 — Código completo y estable
 // =============================================================================
 
 #include <EEPROM.h>
@@ -236,11 +236,22 @@ bool potAlertState = false;
 uint32_t tiempoPotAlert = 0;
 bool ambasPistasFalladas = false;
 
-// Máscara de posiciones recalibradas durante el aprendizaje.
-// Bit 0=R, bit 1=N, bit 2=1, bit 3=2.
-uint8_t posicionesRecalibradasA = 0;
-uint8_t posicionesRecalibradasB = 0;
 uint8_t contadorDiscrepanciaPistas = 0;
+
+// --- Rehabilitación automática de una pista ---
+const uint8_t PISTA_NINGUNA = 255;
+
+uint8_t pistaEnRehabilitacion = PISTA_NINGUNA;
+
+// Número de validaciones completadas para R, N, 1 y 2.
+uint8_t validacionesRehabilitacion[4] = {0, 0, 0, 0};
+
+Marcha posicionRehabilitacion = MARCHA_N;
+bool salioDeUltimaPosicionValidada = true;
+
+bool estabilidadRehabilitacionActiva = false;
+uint32_t inicioEstabilidadRehabilitacion = 0;
+uint16_t ultimaLecturaEstableRehabilitacion = 0;
 
 // =============================================================================
 // PROTOTIPOS
@@ -264,8 +275,11 @@ uint16_t promediarLecturas(uint8_t pin);
 bool validarLectura(uint16_t val);
 const __FlashStringHelper* nombreFalloPot(PotFallo fallo);
 void registrarFalloPista(uint8_t pista, PotFallo motivo);
-void confirmarFalloPista(uint8_t pista, PotFallo motivo, bool fueraRango);
-void recuperarPistaTrasRecalibracion(uint8_t pista);
+void iniciarRehabilitacionPista(uint8_t pista);
+void reiniciarRehabilitacionPista();
+void comprobarRehabilitacionPista();
+bool posicionConfirmadaPorPistaSana(Marcha marcha);
+void rehabilitarPista();
 uint16_t umbralDiferenciaPistas(Marcha m);
 bool verificarPistas();
 uint16_t posEfectiva(Marcha m);
@@ -384,8 +398,6 @@ void loop() {
     estadoActual      = MODO_APRENDIZAJE;
     marchaAprendizaje = MARCHA_N;
     faseParpadeo      = 0;
-    posicionesRecalibradasA = 0;
-    posicionesRecalibradasB = 0;
     contadorDestellos = 0;
     tiempoLed         = ahora;
     if (!enPosicion(posEfectiva(MARCHA_N))) {
@@ -963,6 +975,296 @@ void registrarFalloPista(uint8_t pista, PotFallo motivo) {
     DBG(F("ERR Pot B: "));
     DBGLN_VAL(nombreFalloPot(motivo));
   }
+
+  // Si el fallo procede de EEPROM, no existe una referencia válida
+  // con la que poder rehabilitar automáticamente la pista.
+  if (motivo == POT_FALLO_EEPROM) {
+    return;
+  }
+
+  iniciarRehabilitacionPista(pista);
+}
+
+void iniciarRehabilitacionPista(uint8_t pista) {
+
+  if (pista > 1) return;
+
+  // Si ya hay una pista en proceso de rehabilitación, no cambiamos
+  // el proceso mientras siga siendo válida.
+  if (pistaEnRehabilitacion != PISTA_NINGUNA &&
+      pistaEnRehabilitacion != pista) {
+    return;
+  }
+
+  pistaEnRehabilitacion = pista;
+
+  for (uint8_t i = 0; i < 4; i++) {
+    validacionesRehabilitacion[i] = 0;
+  }
+
+  posicionRehabilitacion = marchaActual;
+  salioDeUltimaPosicionValidada = true;
+
+  estabilidadRehabilitacionActiva = false;
+  inicioEstabilidadRehabilitacion = 0;
+  ultimaLecturaEstableRehabilitacion = 0;
+
+  logAccion(
+      pista == 0
+        ? F("Rehab Pot A INICIADA")
+        : F("Rehab Pot B INICIADA")
+  );
+}
+
+void reiniciarRehabilitacionPista() {
+
+  if (pistaEnRehabilitacion == PISTA_NINGUNA) {
+    return;
+  }
+
+  for (uint8_t i = 0; i < 4; i++) {
+    validacionesRehabilitacion[i] = 0;
+  }
+
+  posicionRehabilitacion = marchaActual;
+  salioDeUltimaPosicionValidada = true;
+
+  estabilidadRehabilitacionActiva = false;
+  inicioEstabilidadRehabilitacion = 0;
+  ultimaLecturaEstableRehabilitacion = 0;
+
+  logAccion(F("Rehab Pot: REINICIO"));
+}
+
+bool posicionConfirmadaPorPistaSana(Marcha marcha) {
+
+  if (pistaEnRehabilitacion == 0) {
+
+    if (potDoble.pistaBFallada) {
+      return false;
+    }
+
+    int16_t diferencia =
+        (int16_t)potDoble.lecturaB -
+        (int16_t)posADC_B[marcha];
+
+    return (
+      diferencia >= -(int16_t)TOLERANCIA_ADC &&
+      diferencia <=  (int16_t)TOLERANCIA_ADC
+    );
+  }
+
+  if (pistaEnRehabilitacion == 1) {
+
+    if (potDoble.pistaAFallada) {
+      return false;
+    }
+
+    int16_t diferencia =
+        (int16_t)potDoble.lecturaA -
+        (int16_t)posADC_A[marcha];
+
+    return (
+      diferencia >= -(int16_t)TOLERANCIA_ADC &&
+      diferencia <=  (int16_t)TOLERANCIA_ADC
+    );
+  }
+
+  return false;
+}
+
+void comprobarRehabilitacionPista() {
+
+  if (pistaEnRehabilitacion == PISTA_NINGUNA) {
+    return;
+  }
+
+  if (potDoble.pistaAFallada &&
+      potDoble.pistaBFallada) {
+    return;
+  }
+
+  // No comprobamos durante ningún movimiento.
+  if (relInActivo || relOutActivo) {
+    estabilidadRehabilitacionActiva = false;
+    return;
+  }
+
+  // No comprobamos durante el modo aprendizaje.
+  if (estadoActual == MODO_APRENDIZAJE ||
+      estadoActual == APRENDIZAJE_MOVIENDO ||
+      estadoActual == APRENDIZAJE_CONFIRMANDO) {
+    estabilidadRehabilitacionActiva = false;
+    return;
+  }
+
+  uint8_t pista = pistaEnRehabilitacion;
+
+  // Si la pista ha dejado de estar marcada como fallada,
+  // la rehabilitación ya no es necesaria.
+  if ((pista == 0 && !potDoble.pistaAFallada) ||
+      (pista == 1 && !potDoble.pistaBFallada)) {
+
+    pistaEnRehabilitacion = PISTA_NINGUNA;
+    estabilidadRehabilitacionActiva = false;
+    return;
+  }
+
+  Marcha marcha = marchaActual;
+
+  // Detectar que hemos abandonado la posición que estaba siendo validada.
+  if (marcha != posicionRehabilitacion) {
+
+    posicionRehabilitacion = marcha;
+    estabilidadRehabilitacionActiva = false;
+
+    // Este cambio de marcha permite volver a validar una posición
+    // que ya hubiera sido validada anteriormente.
+    salioDeUltimaPosicionValidada = true;
+  }
+
+  // La posición actual debe estar confirmada por la pista sana.
+  if (!posicionConfirmadaPorPistaSana(marcha)) {
+
+    // Si la posición no es fiable, no acumulamos estabilidad.
+    estabilidadRehabilitacionActiva = false;
+    return;
+  }
+
+  uint16_t lecturaPista;
+
+  if (pista == 0) {
+    lecturaPista = potDoble.lecturaA;
+  } else {
+    lecturaPista = potDoble.lecturaB;
+  }
+
+  uint16_t posicionEsperada =
+      (pista == 0)
+        ? posADC_A[marcha]
+        : posADC_B[marcha];
+
+  // La lectura debe estar dentro de la tolerancia de la posición.
+  int16_t diferencia =
+      (int16_t)lecturaPista -
+      (int16_t)posicionEsperada;
+
+  bool lecturaCorrecta =
+      diferencia >= -(int16_t)TOLERANCIA_ADC &&
+      diferencia <=  (int16_t)TOLERANCIA_ADC;
+
+  if (!lecturaCorrecta) {
+
+    // Una lectura incorrecta invalida todo el proceso.
+    reiniciarRehabilitacionPista();
+    return;
+  }
+
+  // Primera lectura correcta de esta estancia en la posición.
+  if (!estabilidadRehabilitacionActiva) {
+
+    estabilidadRehabilitacionActiva = true;
+    inicioEstabilidadRehabilitacion = millis();
+    ultimaLecturaEstableRehabilitacion = lecturaPista;
+    return;
+  }
+
+  // La lectura debe permanecer estable.
+  if (abs(
+        (int)lecturaPista -
+        (int)ultimaLecturaEstableRehabilitacion
+      ) > 3) {
+
+    reiniciarRehabilitacionPista();
+    return;
+  }
+
+  ultimaLecturaEstableRehabilitacion = lecturaPista;
+
+  // Todavía no han transcurrido los 2 segundos.
+  if ((millis() - inicioEstabilidadRehabilitacion) <
+      2000UL) {
+    return;
+  }
+
+  // Para contar una segunda validación de la misma marcha,
+  // tiene que haber habido un cambio de marcha desde la validación anterior.
+  if (!salioDeUltimaPosicionValidada) {
+
+    // Ya hemos validado esta posición y seguimos en ella.
+    estabilidadRehabilitacionActiva = false;
+    return;
+  }
+
+  if (validacionesRehabilitacion[marcha] < 2) {
+    validacionesRehabilitacion[marcha]++;
+  }
+
+  DBG(F("Rehab "));
+  DBG_VAL(nombreMarcha(marcha));
+  DBG(F(" #"));
+  DBGLN_VAL(validacionesRehabilitacion[marcha]);
+
+  salioDeUltimaPosicionValidada = false;
+  estabilidadRehabilitacionActiva = false;
+
+  // Comprobar si ya tenemos las dos validaciones de las cuatro marchas.
+  bool completa = true;
+
+  for (uint8_t i = 0; i < 4; i++) {
+    if (validacionesRehabilitacion[i] < 2) {
+      completa = false;
+      break;
+    }
+  }
+
+  if (completa) {
+    rehabilitarPista();
+  }
+}
+
+void rehabilitarPista() {
+
+  if (pistaEnRehabilitacion == PISTA_NINGUNA) {
+    return;
+  }
+
+  uint8_t pista = pistaEnRehabilitacion;
+
+  if (pista == 0) {
+
+    potDoble.pistaAFallada = false;
+    potDoble.motivoFalloA = POT_FALLO_NINGUNO;
+    potDoble.contadorFalloA = 0;
+    potDoble.contadorCongeladoA = 0;
+
+    potDoble.pistaActiva = 0;
+
+    logAccion(F("Pot A REHABILITADA"));
+
+  } else {
+
+    potDoble.pistaBFallada = false;
+    potDoble.motivoFalloB = POT_FALLO_NINGUNO;
+    potDoble.contadorFalloB = 0;
+    potDoble.contadorCongeladoB = 0;
+
+    potDoble.pistaActiva = 1;
+
+    logAccion(F("Pot B REHABILITADA"));
+  }
+
+  pistaEnRehabilitacion = PISTA_NINGUNA;
+
+  estabilidadRehabilitacionActiva = false;
+
+  for (uint8_t i = 0; i < 4; i++) {
+    validacionesRehabilitacion[i] = 0;
+  }
+
+  ambasPistasFalladas =
+      potDoble.pistaAFallada &&
+      potDoble.pistaBFallada;
 }
 
 uint16_t umbralDiferenciaPistas(Marcha m) {
@@ -1291,6 +1593,7 @@ bool verificarPistas() {
     potDoble.ultimoCambioPista = millis();
     logAccion(F("Pot Act:A"));
   }
+  comprobarRehabilitacionPista();
 
   return true;
 }
@@ -1454,64 +1757,8 @@ void guardarPosEnEEPROM(Marcha m, uint16_t valorA, uint16_t valorB) {
   EEPROM.put(EEPROM_POS_A_BASE + m * 2, valorA);
   EEPROM.put(EEPROM_POS_B_BASE + m * 2, valorB);
   EEPROM.write(EEPROM_FIRMA_ADDR, EEPROM_FIRMA_VAL);
-
-  posicionesRecalibradasA |= (1 << m);
-  posicionesRecalibradasB |= (1 << m);
-
-  // Una pista fallada solo puede recuperarse después de recalibrar
-  // explícitamente las cuatro posiciones.
-  if (posicionesRecalibradasA == 0x0F) {
-    recuperarPistaTrasRecalibracion(0);
-  }
-
-  if (posicionesRecalibradasB == 0x0F) {
-    recuperarPistaTrasRecalibracion(1);
-  }
 }
 
-void recuperarPistaTrasRecalibracion(uint8_t pista) {
-
-  if (pista == 0) {
-
-    if (!potDoble.pistaAFallada) return;
-
-    potDoble.pistaAFallada = false;
-    potDoble.motivoFalloA = POT_FALLO_NINGUNO;
-    potDoble.contadorFalloA = 0;
-    potDoble.contadorCongeladoA = 0;
-
-    logAccion(F("Pot A RECUPERADA POR CALIBRACION"));
-
-  } else {
-
-    if (!potDoble.pistaBFallada) return;
-
-    potDoble.pistaBFallada = false;
-    potDoble.motivoFalloB = POT_FALLO_NINGUNO;
-    potDoble.contadorFalloB = 0;
-    potDoble.contadorCongeladoB = 0;
-
-    logAccion(F("Pot B RECUPERADA POR CALIBRACION"));
-  }
-
-  ambasPistasFalladas =
-      potDoble.pistaAFallada &&
-      potDoble.pistaBFallada;
-
-  if (!ambasPistasFalladas) {
-
-    if (potDoble.pistaActiva == 0 &&
-        potDoble.pistaAFallada) {
-
-      potDoble.pistaActiva = 1;
-
-    } else if (potDoble.pistaActiva == 1 &&
-               potDoble.pistaBFallada) {
-
-      potDoble.pistaActiva = 0;
-    }
-  }
-}
 
 // =============================================================================
 // LEDs
