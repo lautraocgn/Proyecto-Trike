@@ -1,6 +1,6 @@
 // =============================================================================
 // SELECTOR DE MARCHAS VW AUTOSTICK — CON REDUNDANCIA DE POTENCIÓMETRO
-// Versión 7.3.3 — Código completo y estable
+// Versión 7.3.4 — Código completo y estable
 // =============================================================================
 
 #include <EEPROM.h>
@@ -14,6 +14,7 @@ const uint16_t BLOQUEO_MS                = 500;
 const uint16_t TIEMPO_PULSACION_LARGA_MS = 600;
 const uint16_t TIMEOUT_MS                = 3000;
 const uint16_t RETARDO_RELE_MS           = 50;
+const uint16_t TIEMPO_MAX_K2             = 3000;
 const uint16_t TIEMPO_LECTURA_POT        = 20;
 const uint16_t TOLERANCIA_ADC            = 25;
 const uint16_t PASO_APRENDIZAJE_MS       = 100;
@@ -195,6 +196,7 @@ uint32_t tiempoAux      = 0;
 
 bool relInActivo  = false;
 bool relOutActivo = false;
+uint32_t tiempoInicioK2 = 0;
 uint32_t tiempoApagadoRele = 0;
 bool esperandoRetardoRele  = false;
 bool relPendienteIn        = false;
@@ -268,6 +270,7 @@ void activarK1();
 void desactivarK1();
 void activarK2();
 void desactivarK2();
+void vigilarK2();
 void apagarTodoReles();
 
 void leerPotenciometro();
@@ -431,6 +434,7 @@ void loop() {
     case APRENDIZAJE_MOVIENDO:    estadoAprendizajeMoviendo();   break;
     case APRENDIZAJE_CONFIRMANDO: estadoAprendizajeConfirmando();break;
   }
+    vigilarK2();
 }
 
 // =============================================================================
@@ -473,14 +477,30 @@ void printResetCause() {
 
   DBG(F("RST "));
 
+  bool causaEncontrada = false;
+
   if (mcusr & (1 << PORF)) {
-    DBG(F("Power-On"));
+    DBG(F("Power-On "));
+    causaEncontrada = true;
   }
+
   if (mcusr & (1 << EXTRF)) {
-    DBG(F("EXT"));
+    DBG(F("EXT "));
+    causaEncontrada = true;
   }
+
+  if (mcusr & (1 << BORF)) {
+    DBG(F("BROWN-OUT "));
+    causaEncontrada = true;
+  }
+
   if (mcusr & (1 << WDRF)) {
-    DBG(F("WDT"));
+    DBG(F("Watchdog Timer "));
+    causaEncontrada = true;
+  }
+
+  if (!causaEncontrada) {
+    DBG(F("DESCONOCIDO"));
   }
 
   DBGLN(F(""));
@@ -873,6 +893,8 @@ void gestionarRetardoRele() {
 }
 
 void activarK1() {
+  if (digitalRead(PIN_K1) == HIGH) return;
+
   digitalWrite(PIN_K1, HIGH);
   logRele(F("K1"), true);
 }
@@ -883,13 +905,40 @@ void desactivarK1() {
 }
 
 void activarK2() {
+  if (digitalRead(PIN_K2) == HIGH) return;
+
   digitalWrite(PIN_K2, HIGH);
+  tiempoInicioK2 = millis();
+
   logRele(F("K2"), true);
 }
 
 void desactivarK2() {
+  if (digitalRead(PIN_K2) == LOW) {
+    tiempoInicioK2 = 0;
+    return;
+  }
+
   digitalWrite(PIN_K2, LOW);
+  tiempoInicioK2 = 0;
+
   logRele(F("K2"), false);
+}
+
+void vigilarK2() {
+
+  if (digitalRead(PIN_K2) == LOW) {
+    tiempoInicioK2 = 0;
+    return;
+  }
+
+  if ((millis() - tiempoInicioK2) >= TIEMPO_MAX_K2) {
+
+    desactivarK2();
+
+    logAccion(F("TIMEOUT K2"));
+    entrarErrorGrave();
+  }
 }
 
 void apagarTodoReles() {
