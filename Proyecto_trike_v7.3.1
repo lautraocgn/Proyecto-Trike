@@ -1,6 +1,6 @@
 // =============================================================================
 // SELECTOR DE MARCHAS VW AUTOSTICK — CON REDUNDANCIA DE POTENCIÓMETRO
-// Versión 7.3 — Código completo y estable
+// Versión 7.3.3 — Código completo y estable
 // =============================================================================
 
 #include <EEPROM.h>
@@ -382,7 +382,7 @@ void loop() {
   }
 
 //  logEstado();
-  logPot();
+//  logPot();
   manejarParpadeoPotAlert();
   procesarComandoSerial();
 
@@ -547,9 +547,11 @@ void logFCCambio(const __FlashStringHelper* mensaje) {
 
 void logPosicionAlcanzada(Marcha m) {
 #if DEBUG
-  DBG("POS ");
+  DBG(F("POS "));
   DBG_VAL(nombreMarcha(m));
-  DBGLN(" OK");
+  DBGLN(F(" OK"));
+
+  logPot();
 #endif
 }
 
@@ -603,22 +605,16 @@ void logEstado() {
 
 void logPot() {
 #if DEBUG
-  static uint16_t ultimaLecturaLog = 0;
-
-  uint16_t actual = potDoble.lecturaEfectiva;
-
-  if (abs((int)actual - (int)ultimaLecturaLog) <= 8) {
-    return;
-  }
-
-  ultimaLecturaLog = actual;
-
-  DBG("P ");
+  DBG(F("P "));
   DBG_VAL(potDoble.lecturaA);
-  DBG("/");
+  DBG(F("/"));
   DBG_VAL(potDoble.lecturaB);
-  DBG(" Act:");
-  DBGLN_VAL(potDoble.pistaActiva == 0 ? F("A") : F("B"));
+  DBG(F(" Act:"));
+  DBGLN_VAL(
+      potDoble.pistaActiva == 0
+        ? F("A")
+        : F("B")
+  );
 #endif
 }
 
@@ -981,7 +977,8 @@ void registrarFalloPista(uint8_t pista, PotFallo motivo) {
   if (motivo == POT_FALLO_EEPROM) {
     return;
   }
-
+  
+  logPot();
   iniciarRehabilitacionPista(pista);
 }
 
@@ -1173,7 +1170,7 @@ void comprobarRehabilitacionPista() {
   if (abs(
         (int)lecturaPista -
         (int)ultimaLecturaEstableRehabilitacion
-      ) > 3) {
+      ) > 8) {
 
     reiniciarRehabilitacionPista();
     return;
