@@ -953,13 +953,11 @@ bool haCruzadoObjetivo(uint16_t objetivo) {
 void moverHacia(uint16_t pos) {
   if (ambasPistasFalladas || pos == 0) {
     apagarActuador();
-    lecturaInicioMovimiento = 0;
     return;
   }
 
   if (enPosicion(pos)) {
     apagarActuador();
-    lecturaInicioMovimiento = 0;
     return;
   }
 
@@ -969,7 +967,6 @@ void moverHacia(uint16_t pos) {
 
   if (haCruzadoObjetivo(pos)) {
     apagarActuador();
-    lecturaInicioMovimiento = 0;
     return;
   }
 
@@ -1330,8 +1327,11 @@ void estadoMoviendo() {
   if (timeoutK2) {
     timeoutK2 = false;
     apagarActuador();
+    lecturaInicioMovimiento = 0;
+
     marchaError = (marchaDestino == MARCHA_R || marchaActual == MARCHA_R)
                     ? MARCHA_R : marchaDestino;
+
     tiempoInicio = ahora;
     estadoActual = RECUPERANDO_A_N;
     return;
@@ -1340,6 +1340,7 @@ void estadoMoviendo() {
   if (upDownSimultaneos()) {
     apagarActuador();
     desactivarK2();
+    lecturaInicioMovimiento = potDoble.lecturaEfectiva;
     marchaDestino = MARCHA_N;
     tiempoInicio = ahora;
     estadoActual = EMERGENCIA_A_N;
@@ -1352,7 +1353,9 @@ void estadoMoviendo() {
 
       if (enPosicion(posEfectiva(MARCHA_N)) ||
           haCruzadoObjetivo(posEfectiva(MARCHA_N))) {
+
         apagarActuador();
+        lecturaInicioMovimiento = 0;
         activarK2();
         tiempoInicio = ahora;
 
@@ -1371,6 +1374,7 @@ void estadoMoviendo() {
         logAccion(F("TIMEOUT N"));
         apagarActuador();
         desactivarK2();
+        lecturaInicioMovimiento = 0;
         marchaError = MARCHA_R;
         tiempoInicio = ahora;
         estadoActual = RECUPERANDO_A_N;
@@ -1382,6 +1386,7 @@ void estadoMoviendo() {
       logAccion(F("ERR FC_S R"));
       apagarActuador();
       desactivarK2();
+      lecturaInicioMovimiento = 0;
       marchaError = MARCHA_R;
       tiempoInicio = ahora;
       estadoActual = RECUPERANDO_A_N;
@@ -1390,9 +1395,11 @@ void estadoMoviendo() {
 
     if (enPosicion(posEfectiva(MARCHA_R)) ||
         haCruzadoObjetivo(posEfectiva(MARCHA_R))) {
+
       apagarActuador();
       desactivarK2();
       desactivarK1();
+      lecturaInicioMovimiento = 0;
       cambioCarrilPendiente = false;
       fcSConfirmado = false;
       marchaActual = MARCHA_R;
@@ -1410,6 +1417,7 @@ void estadoMoviendo() {
       logAccion(F("TIMEOUT R"));
       apagarActuador();
       desactivarK2();
+      lecturaInicioMovimiento = 0;
       marchaError = MARCHA_R;
       tiempoInicio = ahora;
       estadoActual = RECUPERANDO_A_N;
@@ -1419,9 +1427,11 @@ void estadoMoviendo() {
 
   if (enPosicion(posEfectiva(marchaDestino)) ||
       haCruzadoObjetivo(posEfectiva(marchaDestino))) {
+
     apagarActuador();
 
     if (marchaActual == MARCHA_R && marchaDestino == MARCHA_N) {
+      lecturaInicioMovimiento = potDoble.lecturaEfectiva;
       tiempoAux = ahora;
       estadoActual = ESPERA_FC_S_RETORNO;
       return;
@@ -1429,6 +1439,7 @@ void estadoMoviendo() {
 
     desactivarK2();
     desactivarK1();
+    lecturaInicioMovimiento = 0;
     marchaActual = marchaDestino;
     encenderLED(marchaActual);
     logPosicionAlcanzada(marchaActual);
@@ -1444,6 +1455,7 @@ void estadoMoviendo() {
     logAccion(F("TIMEOUT movimiento"));
     apagarActuador();
     desactivarK2();
+    lecturaInicioMovimiento = 0;
     marchaError = marchaDestino;
     tiempoInicio = ahora;
     estadoActual = RECUPERANDO_A_N;
@@ -1500,10 +1512,13 @@ void estadoEmergenciaN() {
 void estadoRecuperandoN() {
   uint32_t ahora = millis();
 
-  if (enPosicion(posEfectiva(MARCHA_N))) {
+  if (enPosicion(posEfectiva(MARCHA_N)) ||
+      haCruzadoObjetivo(posEfectiva(MARCHA_N))) {
+
     apagarActuador();
     desactivarK1();
     desactivarK2();
+    lecturaInicioMovimiento = 0;
     marchaActual = MARCHA_N;
     apagarTodosLEDs();
     encenderLED(MARCHA_N);
@@ -1521,6 +1536,7 @@ void estadoRecuperandoN() {
     apagarActuador();
     desactivarK1();
     desactivarK2();
+    lecturaInicioMovimiento = 0;
     entrarErrorGrave();
   }
 }
