@@ -202,6 +202,9 @@ bool relPendienteOut = false;
 bool cambioCarrilPendiente = false;
 bool fcSConfirmado = false;
 
+uint16_t lecturaInicioMovimiento = 0;
+bool objetivoCruzado = false;
+
 Boton btnUp   = {PIN_BTN_UP, true, true, false, false, 0, 0, false};
 bool ordenUpPendiente = false;
 bool ordenDownPendiente = false;
@@ -352,6 +355,8 @@ void procesarComandoSerial();
 
 void setup() {
   Serial.begin(9600);
+  delay(1000);
+  Serial.println(F("TEST SERIAL OK"));
 
   pinMode(PIN_BTN_UP, INPUT_PULLUP);
   pinMode(PIN_BTN_DOWN, INPUT_PULLUP);
@@ -929,17 +934,50 @@ bool enPosicion(uint16_t pos) {
   return diff >= -(int16_t)TOLERANCIA_ADC && diff <= (int16_t)TOLERANCIA_ADC;
 }
 
+bool haCruzadoObjetivo(uint16_t objetivo) {
+  if (lecturaInicioMovimiento == 0) {
+    return false;
+  }
+
+  if (lecturaInicioMovimiento < objetivo) {
+    return potDoble.lecturaEfectiva >= objetivo;
+  }
+
+  if (lecturaInicioMovimiento > objetivo) {
+    return potDoble.lecturaEfectiva <= objetivo;
+  }
+
+  return false;
+}
+
 void moverHacia(uint16_t pos) {
   if (ambasPistasFalladas || pos == 0) {
     apagarActuador();
+    lecturaInicioMovimiento = 0;
     return;
   }
+
   if (enPosicion(pos)) {
     apagarActuador();
+    lecturaInicioMovimiento = 0;
     return;
   }
-  if (potDoble.lecturaEfectiva < pos) activarReleOut();
-  else activarReleIn();
+
+  if (lecturaInicioMovimiento == 0) {
+    lecturaInicioMovimiento = potDoble.lecturaEfectiva;
+  }
+
+  if (haCruzadoObjetivo(pos)) {
+    apagarActuador();
+    lecturaInicioMovimiento = 0;
+    return;
+  }
+
+  if (potDoble.lecturaEfectiva < pos) {
+    activarReleOut();
+  } else {
+    activarReleIn();
+  }
 }
 
 // =============================================================================
@@ -1252,10 +1290,8 @@ void estadoReposo() {
 void iniciarCambioA(Marcha destino) {
   marchaOrigen = marchaActual;
   marchaDestino = destino;
+  lecturaInicioMovimiento = potDoble.lecturaEfectiva;
   tiempoInicio = millis();
-  cambioCarrilPendiente = false;
-  fcSConfirmado = false;
-  logCambioMarcha(marchaOrigen, marchaDestino);
   activarK1();
   estadoActual = ESPERANDO_FC_C;
 }
@@ -1312,10 +1348,10 @@ void estadoMoviendo() {
 
   if (cambioCarrilPendiente) {
 
-    // Fase 1: llegar a N antes de cambiar de carril.
     if (!fcSConfirmado) {
 
-      if (enPosicion(posEfectiva(MARCHA_N))) {
+      if (enPosicion(posEfectiva(MARCHA_N)) ||
+          haCruzadoObjetivo(posEfectiva(MARCHA_N))) {
         apagarActuador();
         activarK2();
         tiempoInicio = ahora;
@@ -1323,6 +1359,7 @@ void estadoMoviendo() {
         if (analogRead(PIN_FC_S) < 100) {
           logFCCambio(F("FC_S OK"));
           fcSConfirmado = true;
+          lecturaInicioMovimiento = potDoble.lecturaEfectiva;
           tiempoInicio = ahora;
         }
         return;
@@ -1351,8 +1388,8 @@ void estadoMoviendo() {
       return;
     }
 
-    // Fase 2: FC_S confirmado. Ir hacia R.
-    if (enPosicion(posEfectiva(MARCHA_R))) {
+    if (enPosicion(posEfectiva(MARCHA_R)) ||
+        haCruzadoObjetivo(posEfectiva(MARCHA_R))) {
       apagarActuador();
       desactivarK2();
       desactivarK1();
@@ -1380,8 +1417,8 @@ void estadoMoviendo() {
     return;
   }
 
-  // Cambio normal: primero comprobar llegada y solo mover si aún no se alcanzó.
-  if (enPosicion(posEfectiva(marchaDestino))) {
+  if (enPosicion(posEfectiva(marchaDestino)) ||
+      haCruzadoObjetivo(posEfectiva(marchaDestino))) {
     apagarActuador();
 
     if (marchaActual == MARCHA_R && marchaDestino == MARCHA_N) {
@@ -1463,8 +1500,6 @@ void estadoEmergenciaN() {
 void estadoRecuperandoN() {
   uint32_t ahora = millis();
 
-  moverHacia(posEfectiva(MARCHA_N));
-
   if (enPosicion(posEfectiva(MARCHA_N))) {
     apagarActuador();
     desactivarK1();
@@ -1478,6 +1513,8 @@ void estadoRecuperandoN() {
     logPosicionAlcanzada(MARCHA_N);
     return;
   }
+
+  moverHacia(posEfectiva(MARCHA_N));
 
   if ((ahora - tiempoInicio) >= TIMEOUT_MS) {
     logAccion(F("TIMEOUT movimiento"));
