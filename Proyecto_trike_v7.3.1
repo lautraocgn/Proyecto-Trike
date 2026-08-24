@@ -1,6 +1,6 @@
 // =============================================================================
 // SELECTOR DE MARCHAS VW AUTOSTICK — CON REDUNDANCIA DE POTENCIÓMETRO
-// Versión 7.3.5 — Código completo y estable
+// Versión 7.3.4 — Código completo y estable
 // =============================================================================
 
 #include <EEPROM.h>
@@ -10,6 +10,7 @@
 // =============================================================================
 
 const uint16_t DEBOUNCE_MS               = 20;
+const uint16_t VENTANA_DOBLE_PULSACION_MS = 120;
 const uint16_t BLOQUEO_MS                = 500;
 const uint16_t TIEMPO_PULSACION_LARGA_MS = 600;
 const uint16_t TIMEOUT_MS                = 3000;
@@ -202,6 +203,9 @@ bool cambioCarrilPendiente = false;
 bool fcSConfirmado = false;
 
 Boton btnUp   = {PIN_BTN_UP, true, true, false, false, 0, 0, false};
+bool ordenUpPendiente = false;
+bool ordenDownPendiente = false;
+uint32_t tiempoOrdenPendiente = 0;
 Boton btnDown = {PIN_BTN_DOWN, true, true, false, false, 0, 0, false};
 Boton btnModo = {PIN_BTN_MODO, true, true, false, false, 0, 0, false};
 Boton btnConf = {PIN_BTN_CONF, true, true, false, false, 0, 0, false};
@@ -272,6 +276,8 @@ void activarK2();
 void desactivarK2();
 void vigilarK2();
 void apagarTodoReles();
+void cancelarOrdenesPendientes();
+bool procesarDoblePulsacion();
 
 void leerPotenciometro();
 uint16_t promediarLecturas(uint8_t pin);
@@ -700,6 +706,24 @@ void leerBotones() {
   actualizarBoton(btnConf);
 }
 
+void cancelarOrdenesPendientes() {
+  ordenUpPendiente = false;
+  ordenDownPendiente = false;
+}
+
+bool procesarDoblePulsacion() {
+  uint32_t ahora = millis();
+
+  if (upDownSimultaneos()) {
+    cancelarOrdenesPendientes();
+    btnUp.bloqueado = true;
+    btnDown.bloqueado = true;
+    return true;
+  }
+
+  return false;
+}
+
 void actualizarBoton(Boton &btn) {
   uint32_t ahora = millis();
   bool lectura = (digitalRead(btn.pin) == LOW);
@@ -711,22 +735,18 @@ void actualizarBoton(Boton &btn) {
     if ((ahora - btn.ultimoCambio) >= DEBOUNCE_MS) {
       btn.estadoAnterior = lectura;
       btn.ultimoCambio = ahora;
+
       if (lectura) {
+        btn.presionado = true;
         btn.tiempoPresion = ahora;
         btn.bloqueado = false;
       } else {
         btn.soltado = true;
-        btn.bloqueado = false;
       }
     }
   }
 
   btn.estadoActual = lectura;
-
-  if (btn.soltado && !btn.bloqueado) {
-    btn.presionado = true;
-    btn.bloqueado = true;
-  }
 }
 
 bool upDownSimultaneos() {
@@ -1143,10 +1163,14 @@ void estadoArranque() {
 void estadoReposo() {
   uint32_t ahora = millis();
 
-  if (bloqueoCambio && (ahora - tiempoBloqueo) >= BLOQUEO_MS) bloqueoCambio = false;
+  if (bloqueoCambio && (ahora - tiempoBloqueo) >= BLOQUEO_MS) {
+    bloqueoCambio = false;
+  }
+
   if (bloqueoCambio) return;
 
-  if (upDownSimultaneos() && marchaActual != MARCHA_N) {
+  // La doble pulsación tiene prioridad sobre cualquier orden individual.
+  if (procesarDoblePulsacion() && marchaActual != MARCHA_N) {
     marchaOrigen = marchaActual;
     marchaDestino = MARCHA_N;
     tiempoInicio = ahora;
@@ -1155,34 +1179,73 @@ void estadoReposo() {
     return;
   }
 
-  Marcha sig = marchaActual;
-
+  // Primera pulsación: se espera brevemente para comprobar
+  // si aparece la otra y se trata como doble pulsación.
   if (btnUp.presionado) {
-    switch (marchaActual) {
-      case MARCHA_N: sig = MARCHA_1; break;
-      case MARCHA_1: sig = MARCHA_2; break;
-      case MARCHA_R: sig = MARCHA_N; break;
-      case MARCHA_2:
-      default:
-        manejarParpadeoSimple(pinLED(marchaActual));
-        return;
-    }
-    iniciarCambioA(sig);
-    return;
+    ordenUpPendiente = true;
+    ordenDownPendiente = false;
+    tiempoOrdenPendiente = ahora;
   }
 
   if (btnDown.presionado) {
-    switch (marchaActual) {
-      case MARCHA_N: sig = MARCHA_R; break;
-      case MARCHA_1: sig = MARCHA_N; break;
-      case MARCHA_2: sig = MARCHA_1; break;
-      case MARCHA_R:
-      default:
-        manejarParpadeoSimple(pinLED(marchaActual));
-        return;
+    ordenDownPendiente = true;
+    ordenUpPendiente = false;
+    tiempoOrdenPendiente = ahora;
+  }
+
+  if (ordenUpPendiente || ordenDownPendiente) {
+    if (procesarDoblePulsacion()) {
+      if (marchaActual != MARCHA_N) {
+        marchaOrigen = marchaActual;
+        marchaDestino = MARCHA_N;
+        tiempoInicio = ahora;
+        activarK1();
+        estadoActual = EMERGENCIA_A_N;
+      }
+      return;
     }
-    iniciarCambioA(sig);
-    return;
+
+    if ((ahora - tiempoOrdenPendiente) < VENTANA_DOBLE_PULSACION_MS) {
+      return;
+    }
+
+    Marcha sig = marchaActual;
+
+    if (ordenUpPendiente) {
+      ordenUpPendiente = false;
+
+      switch (marchaActual) {
+        case MARCHA_N: sig = MARCHA_1; break;
+        case MARCHA_1: sig = MARCHA_2; break;
+        case MARCHA_R: sig = MARCHA_N; break;
+
+        case MARCHA_2:
+        default:
+          manejarParpadeoSimple(pinLED(marchaActual));
+          return;
+      }
+
+      iniciarCambioA(sig);
+      return;
+    }
+
+    if (ordenDownPendiente) {
+      ordenDownPendiente = false;
+
+      switch (marchaActual) {
+        case MARCHA_N: sig = MARCHA_R; break;
+        case MARCHA_1: sig = MARCHA_N; break;
+        case MARCHA_2: sig = MARCHA_1; break;
+
+        case MARCHA_R:
+        default:
+          manejarParpadeoSimple(pinLED(marchaActual));
+          return;
+      }
+
+      iniciarCambioA(sig);
+      return;
+    }
   }
 }
 
@@ -1248,8 +1311,9 @@ void estadoMoviendo() {
   }
 
   if (cambioCarrilPendiente) {
+
+    // Fase 1: llegar a N antes de cambiar de carril.
     if (!fcSConfirmado) {
-      moverHacia(posEfectiva(MARCHA_N));
 
       if (enPosicion(posEfectiva(MARCHA_N))) {
         apagarActuador();
@@ -1260,10 +1324,11 @@ void estadoMoviendo() {
           logFCCambio(F("FC_S OK"));
           fcSConfirmado = true;
           tiempoInicio = ahora;
-          moverHacia(posEfectiva(MARCHA_R));
         }
         return;
       }
+
+      moverHacia(posEfectiva(MARCHA_N));
 
       if ((ahora - tiempoInicio) >= TIMEOUT_MS) {
         logAccion(F("TIMEOUT N"));
@@ -1286,8 +1351,7 @@ void estadoMoviendo() {
       return;
     }
 
-    moverHacia(posEfectiva(MARCHA_R));
-
+    // Fase 2: FC_S confirmado. Ir hacia R.
     if (enPosicion(posEfectiva(MARCHA_R))) {
       apagarActuador();
       desactivarK2();
@@ -1303,6 +1367,8 @@ void estadoMoviendo() {
       return;
     }
 
+    moverHacia(posEfectiva(MARCHA_R));
+
     if ((ahora - tiempoInicio) >= TIMEOUT_MS) {
       logAccion(F("TIMEOUT R"));
       apagarActuador();
@@ -1314,8 +1380,7 @@ void estadoMoviendo() {
     return;
   }
 
-  moverHacia(posEfectiva(marchaDestino));
-
+  // Cambio normal: primero comprobar llegada y solo mover si aún no se alcanzó.
   if (enPosicion(posEfectiva(marchaDestino))) {
     apagarActuador();
 
@@ -1335,6 +1400,8 @@ void estadoMoviendo() {
     estadoActual = REPOSO;
     return;
   }
+
+  moverHacia(posEfectiva(marchaDestino));
 
   if ((ahora - tiempoInicio) >= TIMEOUT_MS) {
     logAccion(F("TIMEOUT movimiento"));
@@ -1423,12 +1490,12 @@ void estadoRecuperandoN() {
 
 void estadoErrorLeve() {
   uint32_t ahora = millis();
+
   manejarParpadeoSimple(pinLED(marchaError));
 
-  if (upDownSimultaneos()) {
-    apagarTodosLEDs();
-
+  if (procesarDoblePulsacion()) {
     if (marchaActual != MARCHA_N) {
+      apagarTodosLEDs();
       marchaOrigen = marchaActual;
       marchaDestino = MARCHA_N;
       tiempoInicio = ahora;
@@ -1436,40 +1503,72 @@ void estadoErrorLeve() {
       activarK1();
       estadoActual = EMERGENCIA_A_N;
       return;
-    } else {
-      encenderLED(marchaActual);
-      estadoActual = REPOSO;
-      return;
     }
+
+    cancelarOrdenesPendientes();
+    encenderLED(marchaActual);
+    estadoActual = REPOSO;
+    return;
   }
 
-  if (bloqueoCambio && (ahora - tiempoBloqueo) >= BLOQUEO_MS) bloqueoCambio = false;
+  if (bloqueoCambio && (ahora - tiempoBloqueo) >= BLOQUEO_MS) {
+    bloqueoCambio = false;
+  }
+
   if (bloqueoCambio) return;
 
-  Marcha sig = marchaActual;
-
   if (btnUp.presionado) {
-    switch (marchaActual) {
-      case MARCHA_N: sig = MARCHA_1; break;
-      case MARCHA_1: sig = MARCHA_2; break;
-      case MARCHA_R: sig = MARCHA_N; break;
-      case MARCHA_2:
-      default: return;
-    }
-    iniciarCambioA(sig);
-    return;
+    ordenUpPendiente = true;
+    ordenDownPendiente = false;
+    tiempoOrdenPendiente = ahora;
   }
 
   if (btnDown.presionado) {
-    switch (marchaActual) {
-      case MARCHA_N: sig = MARCHA_R; break;
-      case MARCHA_1: sig = MARCHA_N; break;
-      case MARCHA_2: sig = MARCHA_1; break;
-      case MARCHA_R:
-      default: return;
+    ordenDownPendiente = true;
+    ordenUpPendiente = false;
+    tiempoOrdenPendiente = ahora;
+  }
+
+  if (ordenUpPendiente || ordenDownPendiente) {
+    if (procesarDoblePulsacion()) {
+      return;
     }
-    iniciarCambioA(sig);
-    return;
+
+    if ((ahora - tiempoOrdenPendiente) < VENTANA_DOBLE_PULSACION_MS) {
+      return;
+    }
+
+    Marcha sig = marchaActual;
+
+    if (ordenUpPendiente) {
+      ordenUpPendiente = false;
+
+      switch (marchaActual) {
+        case MARCHA_N: sig = MARCHA_1; break;
+        case MARCHA_1: sig = MARCHA_2; break;
+        case MARCHA_R: sig = MARCHA_N; break;
+        case MARCHA_2:
+        default: return;
+      }
+
+      iniciarCambioA(sig);
+      return;
+    }
+
+    if (ordenDownPendiente) {
+      ordenDownPendiente = false;
+
+      switch (marchaActual) {
+        case MARCHA_N: sig = MARCHA_R; break;
+        case MARCHA_1: sig = MARCHA_N; break;
+        case MARCHA_2: sig = MARCHA_1; break;
+        case MARCHA_R:
+        default: return;
+      }
+
+      iniciarCambioA(sig);
+      return;
+    }
   }
 }
 
