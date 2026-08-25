@@ -1,6 +1,6 @@
 // =============================================================================
 // SELECTOR DE MARCHAS VW AUTOSTICK — V8
-// Base: commit 338101bf... / v7.3.6.2
+// Base: commit 338101bf... / v8.1.1
 // =============================================================================
 
 #include <EEPROM.h>
@@ -11,7 +11,6 @@
 
 const uint16_t DEBOUNCE_MS                  = 20;
 const uint16_t VENTANA_DOBLE_PULSACION_MS  = 120;
-//const uint16_t BLOQUEO_MS                   = 500;
 const uint16_t TIEMPO_PULSACION_LARGA_MS   = 600;
 const uint16_t TIMEOUT_MS                   = 3000;
 const uint16_t TIEMPO_MUERTO_INVERSION_MS  = 150;
@@ -630,11 +629,7 @@ void activarReleIn() {
   }
 
   if (relOutActivo) {
-    digitalWrite(PIN_REL_OUT, LOW);
-    relOutActivo = false;
-    tiempoApagadoRele = millis();
-    esperandoRetardoRele = true;
-    logRele(F("OUT"), false);
+    iniciarTiempoMuertoInversion();
     return;
   }
 
@@ -653,11 +648,7 @@ void activarReleOut() {
   }
 
   if (relInActivo) {
-    digitalWrite(PIN_REL_IN, LOW);
-    relInActivo = false;
-    tiempoApagadoRele = millis();
-    esperandoRetardoRele = true;
-    logRele(F("IN"), false);
+    iniciarTiempoMuertoInversion();
     return;
   }
 
@@ -671,21 +662,15 @@ void activarReleOut() {
 }
 
 void apagarActuador() {
-  bool inEstabaActivo = relInActivo;
-  bool outEstabaActivo = relOutActivo;
-
-  digitalWrite(PIN_REL_IN, LOW);
-  digitalWrite(PIN_REL_OUT, LOW);
-
-  relInActivo = false;
-  relOutActivo = false;
-  esperandoRetardoRele = false;
-
-  if (inEstabaActivo) {
+  if (relInActivo) {
+    digitalWrite(PIN_REL_IN, LOW);
+    relInActivo = false;
     logRele(F("IN"), false);
   }
 
-  if (outEstabaActivo) {
+  if (relOutActivo) {
+    digitalWrite(PIN_REL_OUT, LOW);
+    relOutActivo = false;
     logRele(F("OUT"), false);
   }
 }
@@ -698,6 +683,25 @@ void gestionarRetardoRele() {
   if ((millis() - tiempoApagadoRele) >= TIEMPO_MUERTO_INVERSION_MS) {
     esperandoRetardoRele = false;
   }
+}
+
+void iniciarTiempoMuertoInversion() {
+  digitalWrite(PIN_REL_IN, LOW);
+  digitalWrite(PIN_REL_OUT, LOW);
+
+  if (relInActivo) {
+    logRele(F("IN"), false);
+  }
+
+  if (relOutActivo) {
+    logRele(F("OUT"), false);
+  }
+
+  relInActivo = false;
+  relOutActivo = false;
+
+  tiempoApagadoRele = millis();
+  esperandoRetardoRele = true;
 }
 
 void activarK1() {
