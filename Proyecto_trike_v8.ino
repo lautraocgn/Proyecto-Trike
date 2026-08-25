@@ -11,10 +11,10 @@
 
 const uint16_t DEBOUNCE_MS                  = 20;
 const uint16_t VENTANA_DOBLE_PULSACION_MS  = 120;
-const uint16_t BLOQUEO_MS                   = 500;
+//const uint16_t BLOQUEO_MS                   = 500;
 const uint16_t TIEMPO_PULSACION_LARGA_MS   = 600;
 const uint16_t TIMEOUT_MS                   = 3000;
-const uint16_t RETARDO_RELE_MS             = 50;
+const uint16_t TIEMPO_MUERTO_INVERSION_MS  = 150;
 const uint16_t TIEMPO_MAX_K2               = 3000;
 const uint16_t TIEMPO_LECTURA_POT          = 20;
 const uint16_t TOLERANCIA_ADC              = 25;
@@ -193,8 +193,6 @@ bool relOutActivo = false;
 uint32_t tiempoInicioK2 = 0;
 uint32_t tiempoApagadoRele = 0;
 bool esperandoRetardoRele = false;
-bool relPendienteIn = false;
-bool relPendienteOut = false;
 
 bool cambioCarrilPendiente = false;
 bool fcSConfirmado = false;
@@ -211,9 +209,6 @@ Boton btnConf = {PIN_BTN_CONF, true, true, false, false, 0, 0, false};
 bool ordenUpPendiente = false;
 bool ordenDownPendiente = false;
 uint32_t tiempoOrdenPendiente = 0;
-
-bool bloqueoCambio = false;
-uint32_t tiempoBloqueo = 0;
 
 uint32_t tiempoLed = 0;
 bool ledEstado = false;
@@ -514,22 +509,28 @@ void actualizarBoton(Boton &btn) {
   btn.presionado = false;
   btn.soltado = false;
 
+  // Se detecta inmediatamente cualquier cambio físico y se reinicia
+  // el tiempo de estabilidad.
   if (lectura != btn.estadoAnterior) {
-    if ((ahora - btn.ultimoCambio) >= DEBOUNCE_MS) {
-      btn.estadoAnterior = lectura;
-      btn.ultimoCambio = ahora;
-
-      if (lectura) {
-        btn.presionado = true;   // Flanco HIGH -> LOW
-        btn.tiempoPresion = ahora;
-        btn.bloqueado = false;
-      } else {
-        btn.soltado = true;
-      }
-    }
+    btn.estadoAnterior = lectura;
+    btn.ultimoCambio = ahora;
   }
 
-  btn.estadoActual = lectura;
+  // Solo se acepta como nuevo estado si la lectura se ha mantenido
+  // estable durante todo el tiempo de antirrebote.
+  if ((ahora - btn.ultimoCambio) >= DEBOUNCE_MS &&
+      lectura != btn.estadoActual) {
+
+    btn.estadoActual = lectura;
+
+    if (btn.estadoActual) {
+      btn.presionado = true;
+      btn.tiempoPresion = ahora;
+      btn.bloqueado = false;
+    } else {
+      btn.soltado = true;
+    }
+  }
 }
 
 bool upDownSimultaneos() {
@@ -543,6 +544,7 @@ bool hayNuevaOrden() {
 void limpiarOrdenesPendientes() {
   ordenUpPendiente = false;
   ordenDownPendiente = false;
+  tiempoOrdenPendiente = 0;
 }
 
 Marcha siguienteMarcha(Marcha desde, bool up) {
@@ -623,15 +625,20 @@ bool obtenerNuevaOrden(Marcha &destino) {
 // =============================================================================
 
 void activarReleIn() {
-  if (relInActivo) return;
+  if (relInActivo) {
+    return;
+  }
 
   if (relOutActivo) {
     digitalWrite(PIN_REL_OUT, LOW);
     relOutActivo = false;
     tiempoApagadoRele = millis();
     esperandoRetardoRele = true;
-    relPendienteIn = true;
-    relPendienteOut = false;
+    logRele(F("OUT"), false);
+    return;
+  }
+
+  if (esperandoRetardoRele) {
     return;
   }
 
@@ -641,15 +648,20 @@ void activarReleIn() {
 }
 
 void activarReleOut() {
-  if (relOutActivo) return;
+  if (relOutActivo) {
+    return;
+  }
 
   if (relInActivo) {
     digitalWrite(PIN_REL_IN, LOW);
     relInActivo = false;
     tiempoApagadoRele = millis();
     esperandoRetardoRele = true;
-    relPendienteOut = true;
-    relPendienteIn = false;
+    logRele(F("IN"), false);
+    return;
+  }
+
+  if (esperandoRetardoRele) {
     return;
   }
 
@@ -659,32 +671,32 @@ void activarReleOut() {
 }
 
 void apagarActuador() {
+  bool inEstabaActivo = relInActivo;
+  bool outEstabaActivo = relOutActivo;
+
   digitalWrite(PIN_REL_IN, LOW);
   digitalWrite(PIN_REL_OUT, LOW);
+
   relInActivo = false;
   relOutActivo = false;
   esperandoRetardoRele = false;
-  relPendienteIn = false;
-  relPendienteOut = false;
+
+  if (inEstabaActivo) {
+    logRele(F("IN"), false);
+  }
+
+  if (outEstabaActivo) {
+    logRele(F("OUT"), false);
+  }
 }
 
 void gestionarRetardoRele() {
-  if (!esperandoRetardoRele) return;
+  if (!esperandoRetardoRele) {
+    return;
+  }
 
-  if ((millis() - tiempoApagadoRele) >= RETARDO_RELE_MS) {
+  if ((millis() - tiempoApagadoRele) >= TIEMPO_MUERTO_INVERSION_MS) {
     esperandoRetardoRele = false;
-
-    if (relPendienteIn) {
-      relPendienteIn = false;
-      digitalWrite(PIN_REL_IN, HIGH);
-      relInActivo = true;
-      logRele(F("IN"), true);
-    } else if (relPendienteOut) {
-      relPendienteOut = false;
-      digitalWrite(PIN_REL_OUT, HIGH);
-      relOutActivo = true;
-      logRele(F("OUT"), true);
-    }
   }
 }
 
@@ -875,9 +887,6 @@ void confirmarMarcha(Marcha marcha) {
   cambioCarrilPendiente = false;
   fcSConfirmado = false;
   lecturaInicioMovimiento = 0;
-
-  bloqueoCambio = true;
-  tiempoBloqueo = millis();
 
   logPosicionAlcanzada(marcha);
 }
@@ -1151,7 +1160,6 @@ void estadoArranque() {
       marchaActual = MARCHA_N;
       marchaDestino = MARCHA_N;
       cancelacionVisualActiva = false;
-      bloqueoCambio = false;
       errorMarcha[MARCHA_N] = false;
       estadoActual = REPOSO;
       logPosicionAlcanzada(MARCHA_N);
@@ -1213,15 +1221,6 @@ void cancelarYRedirigir(Marcha nuevoDestino) {
 }
 
 void estadoReposo() {
-  uint32_t ahora = millis();
-
-  if (bloqueoCambio &&
-      (ahora - tiempoBloqueo) >= BLOQUEO_MS) {
-    bloqueoCambio = false;
-  }
-
-  if (bloqueoCambio) return;
-
   Marcha nuevoDestino;
 
   if (!obtenerNuevaOrden(nuevoDestino)) {
@@ -1229,9 +1228,7 @@ void estadoReposo() {
   }
 
   if (nuevoDestino == marchaActual) {
-    if (nuevoDestino == MARCHA_N) {
-      limpiarOrdenesPendientes();
-    }
+    limpiarOrdenesPendientes();
     return;
   }
 
