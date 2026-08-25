@@ -1,6 +1,6 @@
 // =============================================================================
 // SELECTOR DE MARCHAS VW AUTOSTICK — V8
-// Base: commit 338101bf... / v8.1.1
+// Base: commit 338101bf... / v8.1.2
 // =============================================================================
 
 #include <EEPROM.h>
@@ -1241,6 +1241,14 @@ void estadoReposo() {
 
 void estadoEsperandoFCC() {
   uint32_t ahora = millis();
+  Marcha nuevoDestino;
+
+  // K1 no se interrumpe. Una nueva orden modifica el destino que
+  // se ejecutará cuando termine correctamente la maniobra transversal.
+  if (obtenerNuevaOrden(nuevoDestino)) {
+    marchaDestino = nuevoDestino;
+    logCambioMarcha(marchaOrigen, marchaDestino);
+  }
 
   if (digitalRead(PIN_FC_C) == LOW) {
     logFCCambio(F("FC_C OK"));
@@ -1252,7 +1260,6 @@ void estadoEsperandoFCC() {
       if (fcSCarrilPrincipal()) {
         iniciarMovimientoPosicion(marchaDestino);
       } else {
-        tiempoInicio = ahora;
         estadoActual = ESPERANDO_FC_S_PRINCIPAL;
       }
 
@@ -1264,7 +1271,7 @@ void estadoEsperandoFCC() {
       return;
     }
 
-    // N -> R: se mueve primero longitudinalmente a N.
+    // N -> R: primero se alcanza N y después se inicia el cambio de carril.
     cambioCarrilPendiente = true;
     fcSConfirmado = false;
     iniciarMovimientoPosicion(MARCHA_N);
@@ -1312,21 +1319,27 @@ void estadoMoviendo() {
     return;
   }
 
-  // Nueva orden mientras se está moviendo.
-  Marcha nuevoDestino;
-  if (obtenerNuevaOrden(nuevoDestino)) {
-    // Durante N -> R, la única orden válida de cancelación es N.
-    if (marchaDestino == MARCHA_R) {
-      if (nuevoDestino == MARCHA_N) {
-        cancelarYRedirigir(MARCHA_N);
-      }
-      return;
-    }
+// Nueva orden mientras se está moviendo.
+Marcha nuevoDestino;
+if (obtenerNuevaOrden(nuevoDestino)) {
 
-    cancelarYRedirigir(nuevoDestino);
+  // N -> R: solo se puede cancelar hacia N.
+  if (marchaDestino == MARCHA_R) {
+    if (nuevoDestino == MARCHA_N) {
+      cancelarYRedirigir(MARCHA_N);
+    }
     return;
   }
 
+  // R -> N: hasta confirmar N no se permite redirigir la maniobra.
+  if (marchaOrigen == MARCHA_R &&
+      marchaDestino == MARCHA_N) {
+    return;
+  }
+
+  cancelarYRedirigir(nuevoDestino);
+  return;
+}
   // ---------------------------------------------------------------------------
   // Destino N
   // ---------------------------------------------------------------------------
@@ -1382,7 +1395,7 @@ void estadoMoviendo() {
   if (marchaDestino == MARCHA_R) {
 
     if (!fcSCarrilR()) {
-      entrarErrorGrave();
+      registrarErrorMarcha(MARCHA_R);
       return;
     }
 
@@ -1406,7 +1419,7 @@ void estadoMoviendo() {
   // ---------------------------------------------------------------------------
 
   if (!fcSCarrilPrincipal()) {
-    entrarErrorGrave();
+    registrarErrorMarcha(marchaDestino);
     return;
   }
 
@@ -1426,9 +1439,17 @@ void estadoMoviendo() {
 void estadoEsperandoFCSCambioCarril() {
   uint32_t ahora = millis();
 
+  // Un timeout de K2 tiene prioridad absoluta sobre cualquier orden.
+  if (timeoutK2) {
+    timeoutK2 = false;
+    entrarErrorGrave();
+    return;
+  }
+
   // Durante este estado K2 está activo y todavía estamos físicamente en N.
   Marcha nuevoDestino;
   if (obtenerNuevaOrden(nuevoDestino)) {
+    // La única cancelación válida durante N -> R es volver a N.
     if (nuevoDestino == MARCHA_N) {
       marchaCancelada = marchaDestino;
       cancelacionVisualActiva = true;
@@ -1456,12 +1477,6 @@ void estadoEsperandoFCSCambioCarril() {
     lecturaInicioMovimiento = potDoble.lecturaEfectiva;
     tiempoInicio = ahora;
     iniciarMovimientoPosicion(MARCHA_R);
-    return;
-  }
-
-  if (timeoutK2) {
-    timeoutK2 = false;
-    entrarErrorGrave();
     return;
   }
 
@@ -1493,7 +1508,7 @@ void estadoEsperaFCSRetorno() {
   }
 
   if ((ahora - tiempoInicio) >= TIMEOUT_MS) {
-    entrarErrorGrave();
+    registrarErrorMarcha(MARCHA_N);
   }
 }
 
@@ -1585,7 +1600,7 @@ void printResetCause() {
 
 void printDiagnosticoInicial() {
 #if DEBUG
-  DBGLN(F("VERSION V8"));
+  DBGLN(F("VERSION V8.1.2"));
   printResetCause();
 
   DBG(F("EEP R")); DBG_VAL(posADC_A[MARCHA_R]); DBG(F("/")); DBG_VAL(posADC_B[MARCHA_R]);
