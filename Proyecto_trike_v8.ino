@@ -1,6 +1,6 @@
 // =============================================================================
 // SELECTOR DE MARCHAS VW AUTOSTICK — V8
-// Base: commit 338101bf... / v8.1.3
+// Base: commit 338101bf... / v8.1.4
 // =============================================================================
 
 #include <EEPROM.h>
@@ -1390,39 +1390,46 @@ void estadoMoviendo() {
     return;
   }
 
-// Nueva orden mientras se está moviendo.
-Marcha nuevoDestino;
-if (obtenerNuevaOrden(nuevoDestino)) {
+  // Nueva orden mientras se está moviendo.
+  Marcha nuevoDestino;
+  if (obtenerNuevaOrden(nuevoDestino)) {
 
-  // N -> R: solo se puede cancelar hacia N.
-  if (marchaDestino == MARCHA_R) {
-    if (nuevoDestino == MARCHA_N) {
-      cancelarYRedirigir(MARCHA_N);
+    // N -> R: solo se puede cancelar hacia N.
+    if (marchaDestino == MARCHA_R) {
+      if (nuevoDestino == MARCHA_N) {
+        cancelarYRedirigir(MARCHA_N);
+      }
+      return;
     }
+
+    // R -> N: hasta confirmar N no se permite redirigir la maniobra.
+    if (marchaOrigen == MARCHA_R &&
+        marchaDestino == MARCHA_N) {
+      return;
+    }
+
+    cancelarYRedirigir(nuevoDestino);
     return;
   }
 
-  // R -> N: hasta confirmar N no se permite redirigir la maniobra.
-  if (marchaOrigen == MARCHA_R &&
-      marchaDestino == MARCHA_N) {
-    return;
-  }
-
-  cancelarYRedirigir(nuevoDestino);
-  return;
-}
   // ---------------------------------------------------------------------------
   // Destino N
   // ---------------------------------------------------------------------------
 
   if (marchaDestino == MARCHA_N) {
 
-    // Para N el FC_S no condiciona el inicio del movimiento.
     if (enPosicion(posEfectiva(MARCHA_N))) {
       apagarActuador();
       lecturaInicioMovimiento = 0;
-      tiempoAux = ahora;
-      estadoActual = ESPERA_FC_S_RETORNO;
+
+      // Solo R -> N necesita esperar el retorno de FC_S al carril principal.
+      if (marchaOrigen == MARCHA_R) {
+        tiempoInicio = ahora;
+        estadoActual = ESPERA_FC_S_RETORNO;
+      } else {
+        confirmarMarcha(MARCHA_N);
+      }
+
       return;
     }
 
@@ -1463,22 +1470,22 @@ if (obtenerNuevaOrden(nuevoDestino)) {
   // Destino R: desplazamiento longitudinal dentro del carril R
   // ---------------------------------------------------------------------------
 
-if (marchaDestino == MARCHA_R) {
+  if (marchaDestino == MARCHA_R) {
 
-  if (enPosicion(posEfectiva(MARCHA_R))) {
-    apagarActuador();
-    confirmarMarcha(MARCHA_R);
+    if (enPosicion(posEfectiva(MARCHA_R))) {
+      apagarActuador();
+      confirmarMarcha(MARCHA_R);
+      return;
+    }
+
+    moverHacia(posEfectiva(MARCHA_R));
+
+    if ((ahora - tiempoInicio) >= TIMEOUT_MS) {
+      registrarErrorMarcha(MARCHA_R);
+    }
+
     return;
   }
-
-  moverHacia(posEfectiva(MARCHA_R));
-
-  if ((ahora - tiempoInicio) >= TIMEOUT_MS) {
-    registrarErrorMarcha(MARCHA_R);
-  }
-
-  return;
-}
 
   // ---------------------------------------------------------------------------
   // Destino 1ª o 2ª
@@ -1666,7 +1673,7 @@ void printResetCause() {
 
 void printDiagnosticoInicial() {
 #if DEBUG
-  DBGLN(F("VERSION V8.1.3"));
+  DBGLN(F("VERSION V8.1.4"));
   printResetCause();
 
   DBG(F("EEP R")); DBG_VAL(posADC_A[MARCHA_R]); DBG(F("/")); DBG_VAL(posADC_B[MARCHA_R]);
