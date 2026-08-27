@@ -1,6 +1,6 @@
 // =============================================================================
 // SELECTOR DE MARCHAS VW AUTOSTICK — V8
-// Base: commit 338101bf... / v8.1.2
+// Base: commit 338101bf... / v8.1.3
 // =============================================================================
 
 #include <EEPROM.h>
@@ -21,7 +21,7 @@ const uint16_t PASO_APRENDIZAJE_MS         = 100;
 
 const uint16_t RANGO_MIN_ADC               = 10;
 const uint16_t RANGO_MAX_ADC               = 1013;
-const uint16_t TIEMPO_VERIFICACION_POT     = 150;
+const uint16_t TIEMPO_VERIFICACION_POT     = 25;
 const uint8_t  NUM_MUESTRAS_PROMEDIO       = 5;
 const uint16_t UMBRAL_SALTO_ERRATICO       = 120;
 const uint16_t UMBRAL_CONGELADO            = 3;
@@ -336,6 +336,7 @@ void estadoErrorGrave();
 
 void iniciarCambioA(Marcha destino);
 void entrarErrorGrave();
+void logOrden(const __FlashStringHelper* boton, Marcha actual, Marcha destino);
 
 // Aprendizaje
 void estadoModoAprendizaje();
@@ -599,6 +600,27 @@ bool obtenerNuevaOrden(Marcha &destino) {
   }
 
   bool up = ordenUpPendiente;
+bool down = ordenDownPendiente;
+limpiarOrdenesPendientes();
+
+if (up && !down) {
+  Marcha siguiente = siguienteMarcha(marchaDestino, true);
+  if (siguiente == marchaDestino) return false;
+
+  logOrden(F("UP"), marchaActual, siguiente);
+  destino = siguiente;
+  return true;
+}
+
+if (down && !up) {
+  Marcha siguiente = siguienteMarcha(marchaDestino, false);
+  if (siguiente == marchaDestino) return false;
+
+  logOrden(F("DOWN"), marchaActual, siguiente);
+  destino = siguiente;
+  return true;
+}
+/*  bool up = ordenUpPendiente;
   bool down = ordenDownPendiente;
   limpiarOrdenesPendientes();
 
@@ -614,7 +636,7 @@ bool obtenerNuevaOrden(Marcha &destino) {
     if (siguiente == marchaDestino) return false;
     destino = siguiente;
     return true;
-  }
+    */
 
   return false;
 }
@@ -726,6 +748,9 @@ void activarK2() {
 }
 
 void desactivarK2() {
+  DBG(F("K2 OFF | ESTADO="));
+  DBGLN_VAL(nombreEstado(estadoActual));
+
   if (digitalRead(PIN_K2) == LOW) {
     tiempoInicioK2 = 0;
     return;
@@ -842,6 +867,17 @@ bool enPosicion(uint16_t pos) {
 }
 
 void moverHacia(uint16_t pos) {
+  DBG(F("MOVER | ESTADO="));
+  DBG_VAL(estadoActual);
+  DBG(F(" | ACTUAL="));
+  DBG_VAL(nombreMarcha(marchaActual));
+  DBG(F(" | DESTINO="));
+  DBG_VAL(nombreMarcha(marchaDestino));
+  DBG(F(" | P="));
+  DBG_VAL(potDoble.lecturaEfectiva);
+  DBG(F(" | OBJ="));
+  DBGLN_VAL(pos);
+
   if (ambasPistasFalladas || pos == 0) {
     apagarActuador();
     return;
@@ -892,6 +928,8 @@ void confirmarMarcha(Marcha marcha) {
   fcSConfirmado = false;
   lecturaInicioMovimiento = 0;
 
+  estadoActual = REPOSO;
+
   logPosicionAlcanzada(marcha);
 }
 
@@ -901,6 +939,9 @@ void registrarErrorMarcha(Marcha marcha) {
   desactivarK1();
 
   errorMarcha[marcha] = true;
+
+  marchaDestino = marchaActual;
+
   cancelacionVisualActiva = false;
   movimientoEsN = false;
   movimientoEsR = false;
@@ -1186,6 +1227,12 @@ void estadoArranque() {
 }
 
 void iniciarCambioA(Marcha destino) {
+
+DBG(F("INICIAR CAMBIO | ORIGEN "));
+DBG_VAL(nombreMarcha(marchaActual));
+DBG(F(" | DESTINO "));
+DBGLN_VAL(nombreMarcha(destino));
+  
   marchaOrigen = marchaActual;
   marchaDestino = destino;
 
@@ -1225,6 +1272,16 @@ void cancelarYRedirigir(Marcha nuevoDestino) {
 }
 
 void estadoReposo() {
+  static Estado ultimoEstadoLog = (Estado)255;
+
+  if (ultimoEstadoLog != estadoActual) {
+    DBG(F("ESTADO REPOSO | ACTUAL "));
+    DBG_VAL(nombreMarcha(marchaActual));
+    DBG(F(" | DESTINO "));
+    DBGLN_VAL(nombreMarcha(marchaDestino));
+    ultimoEstadoLog = estadoActual;
+  }
+  
   Marcha nuevoDestino;
 
   if (!obtenerNuevaOrden(nuevoDestino)) {
@@ -1243,8 +1300,6 @@ void estadoEsperandoFCC() {
   uint32_t ahora = millis();
   Marcha nuevoDestino;
 
-  // K1 no se interrumpe. Una nueva orden modifica el destino que
-  // se ejecutará cuando termine correctamente la maniobra transversal.
   if (obtenerNuevaOrden(nuevoDestino)) {
     marchaDestino = nuevoDestino;
     logCambioMarcha(marchaOrigen, marchaDestino);
@@ -1271,10 +1326,26 @@ void estadoEsperandoFCC() {
       return;
     }
 
-    // N -> R: primero se alcanza N y después se inicia el cambio de carril.
+    // Destino R:
+    // Si ya estamos en N, cambiamos inmediatamente al carril R.
+    if (enPosicion(posEfectiva(MARCHA_N))) {
+      apagarActuador();
+      lecturaInicioMovimiento = 0;
+      cambioCarrilPendiente = false;
+      fcSConfirmado = false;
+      activarK2();
+      estadoActual = ESPERANDO_FC_S_CAMBIO_CARRIL;
+      return;
+    }
+
+    // Aún no estamos en N.
+    // Conservamos marchaDestino = R para que estadoMoviendo()
+    // sepa que debe activar K2 al llegar a N.
     cambioCarrilPendiente = true;
     fcSConfirmado = false;
-    iniciarMovimientoPosicion(MARCHA_N);
+    lecturaInicioMovimiento = potDoble.lecturaEfectiva;
+    tiempoInicio = ahora;
+    estadoActual = MOVIENDO;
     return;
   }
 
@@ -1392,27 +1463,22 @@ if (obtenerNuevaOrden(nuevoDestino)) {
   // Destino R: desplazamiento longitudinal dentro del carril R
   // ---------------------------------------------------------------------------
 
-  if (marchaDestino == MARCHA_R) {
+if (marchaDestino == MARCHA_R) {
 
-    if (!fcSCarrilR()) {
-      registrarErrorMarcha(MARCHA_R);
-      return;
-    }
-
-    if (enPosicion(posEfectiva(MARCHA_R))) {
-      apagarActuador();
-      confirmarMarcha(MARCHA_R);
-      return;
-    }
-
-    moverHacia(posEfectiva(MARCHA_R));
-
-    if ((ahora - tiempoInicio) >= TIMEOUT_MS) {
-      registrarErrorMarcha(MARCHA_R);
-    }
-
+  if (enPosicion(posEfectiva(MARCHA_R))) {
+    apagarActuador();
+    confirmarMarcha(MARCHA_R);
     return;
   }
+
+  moverHacia(posEfectiva(MARCHA_R));
+
+  if ((ahora - tiempoInicio) >= TIMEOUT_MS) {
+    registrarErrorMarcha(MARCHA_R);
+  }
+
+  return;
+}
 
   // ---------------------------------------------------------------------------
   // Destino 1ª o 2ª
@@ -1600,7 +1666,7 @@ void printResetCause() {
 
 void printDiagnosticoInicial() {
 #if DEBUG
-  DBGLN(F("VERSION V8.1.2"));
+  DBGLN(F("VERSION V8.1.3"));
   printResetCause();
 
   DBG(F("EEP R")); DBG_VAL(posADC_A[MARCHA_R]); DBG(F("/")); DBG_VAL(posADC_B[MARCHA_R]);
@@ -1619,6 +1685,17 @@ void logCambioMarcha(Marcha origen, Marcha destino) {
   DBG(F("CAM "));
   DBG_VAL(nombreMarcha(origen));
   DBG(F(">"));
+  DBGLN_VAL(nombreMarcha(destino));
+#endif
+}
+
+void logOrden(const __FlashStringHelper* boton, Marcha actual, Marcha destino) {
+#if DEBUG
+  DBG(F("BOTON "));
+  DBG_VAL(boton);
+  DBG(F(" | ACTUAL "));
+  DBG_VAL(nombreMarcha(actual));
+  DBG(F(" | DESTINO "));
   DBGLN_VAL(nombreMarcha(destino));
 #endif
 }
