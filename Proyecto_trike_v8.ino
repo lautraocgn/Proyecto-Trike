@@ -1,6 +1,6 @@
 // =============================================================================
-// SELECTOR DE MARCHAS VW AUTOSTICK — V8
-// Base: commit 338101bf... / v8.1.4
+// SELECTOR DE MARCHAS VW AUTOSTICK — V8.2
+// Base: v8.1.4 — refactorización de maniobras
 // =============================================================================
 
 #include <EEPROM.h>
@@ -18,6 +18,7 @@ const uint16_t TIEMPO_MAX_K2               = 3000;
 const uint16_t TIEMPO_LECTURA_POT          = 20;
 const uint16_t TOLERANCIA_ADC              = 25;
 const uint16_t PASO_APRENDIZAJE_MS         = 100;
+const uint16_t TIEMPO_PAUSA_N               = 500;
 
 const uint16_t RANGO_MIN_ADC               = 10;
 const uint16_t RANGO_MAX_ADC               = 1013;
@@ -113,14 +114,19 @@ enum PotFallo {
   POT_FALLO_EEPROM
 };
 
+enum EstadoManiobra {
+  MANIOBRA_INICIO,
+  MANIOBRA_IR_A_N,
+  MANIOBRA_PAUSA_N,
+  MANIOBRA_ESPERAR_FC_S,
+  MANIOBRA_MOVER
+};
+
 enum Estado {
   ARRANQUE,
   REPOSO,
   ESPERANDO_FC_C,
-  ESPERANDO_FC_S_PRINCIPAL,
-  MOVIENDO,
-  ESPERANDO_FC_S_CAMBIO_CARRIL,
-  ESPERA_FC_S_RETORNO,
+  MANIOBRA,
   ERROR_GRAVE,
 
   MODO_APRENDIZAJE,
@@ -178,8 +184,6 @@ Marcha marchaDestino = MARCHA_N;
 Marcha marchaOrigen  = MARCHA_N;
 
 bool errorMarcha[4] = {false, false, false, false};
-Marcha marchaCancelada = MARCHA_N;
-bool cancelacionVisualActiva = false;
 
 uint16_t posADC_A[4];
 uint16_t posADC_B[4];
@@ -193,10 +197,7 @@ uint32_t tiempoInicioK2 = 0;
 uint32_t tiempoApagadoRele = 0;
 bool esperandoRetardoRele = false;
 
-bool cambioCarrilPendiente = false;
-bool fcSConfirmado = false;
-bool movimientoEsR = false;
-bool movimientoEsN = false;
+EstadoManiobra estadoSubmaniobra = MANIOBRA_INICIO;
 
 uint16_t lecturaInicioMovimiento = 0;
 
@@ -269,12 +270,12 @@ bool hayNuevaOrden();
 void limpiarOrdenesPendientes();
 bool obtenerNuevaOrden(Marcha &destino);
 Marcha siguienteMarcha(Marcha desde, bool up);
-void cancelarYRedirigir(Marcha nuevoDestino);
 
 void activarReleIn();
 void activarReleOut();
 void apagarActuador();
 void gestionarRetardoRele();
+void iniciarTiempoMuertoInversion();
 void activarK1();
 void desactivarK1();
 void activarK2();
@@ -299,9 +300,9 @@ uint16_t obtenerLecturaSegura();
 uint16_t leerPot();
 
 bool enPosicion(uint16_t pos);
+void moverHacia(uint16_t pos);
 bool fcSCarrilPrincipal();
 bool fcSCarrilR();
-void iniciarMovimientoPosicion(Marcha destino);
 void confirmarMarcha(Marcha marcha);
 void registrarErrorMarcha(Marcha marcha);
 
@@ -328,10 +329,16 @@ void procesarComandoSerial();
 void estadoArranque();
 void estadoReposo();
 void estadoEsperandoFCC();
-void estadoEsperandoFCSSPrincipal();
-void estadoMoviendo();
-void estadoEsperandoFCSCambioCarril();
-void estadoEsperaFCSRetorno();
+void ejecutarManiobra();
+void maniobraR();
+void maniobraN();
+void maniobra1();
+void maniobra2();
+void iniciarIrAN();
+void iniciarMovimientoFinal(Marcha destino);
+void iniciarEsperaFCS();
+void resetearEstadoManiobra();
+void procesarRedireccionManiobra();
 void estadoErrorGrave();
 
 void iniciarCambioA(Marcha destino);
@@ -465,10 +472,7 @@ void loop() {
     case ARRANQUE:                         estadoArranque(); break;
     case REPOSO:                           estadoReposo(); break;
     case ESPERANDO_FC_C:                   estadoEsperandoFCC(); break;
-    case ESPERANDO_FC_S_PRINCIPAL:         estadoEsperandoFCSSPrincipal(); break;
-    case MOVIENDO:                         estadoMoviendo(); break;
-    case ESPERANDO_FC_S_CAMBIO_CARRIL:    estadoEsperandoFCSCambioCarril(); break;
-    case ESPERA_FC_S_RETORNO:              estadoEsperaFCSRetorno(); break;
+    case MANIOBRA:                         ejecutarManiobra(); break;
     case ERROR_GRAVE:                      estadoErrorGrave(); break;
 
     case MODO_APRENDIZAJE:                 estadoModoAprendizaje(); break;
@@ -903,59 +907,8 @@ bool fcSCarrilR() {
   return digitalRead(PIN_FC_S) == LOW;
 }
 
-void iniciarMovimientoPosicion(Marcha destino) {
-  marchaDestino = destino;
-  lecturaInicioMovimiento = potDoble.lecturaEfectiva;
-  movimientoEsN = (destino == MARCHA_N);
-  movimientoEsR = (destino == MARCHA_R);
-  tiempoInicio = millis();
-  estadoActual = MOVIENDO;
-}
-
-void confirmarMarcha(Marcha marcha) {
-  apagarActuador();
-  desactivarK2();
-  desactivarK1();
-
-  marchaActual = marcha;
-  marchaDestino = marcha;
-  errorMarcha[marcha] = false;
-
-  cancelacionVisualActiva = false;
-  movimientoEsN = false;
-  movimientoEsR = false;
-  cambioCarrilPendiente = false;
-  fcSConfirmado = false;
-  lecturaInicioMovimiento = 0;
-
-  estadoActual = REPOSO;
-
-  logPosicionAlcanzada(marcha);
-}
-
-void registrarErrorMarcha(Marcha marcha) {
-  apagarActuador();
-  desactivarK2();
-  desactivarK1();
-
-  errorMarcha[marcha] = true;
-
-  marchaDestino = marchaActual;
-
-  cancelacionVisualActiva = false;
-  movimientoEsN = false;
-  movimientoEsR = false;
-  cambioCarrilPendiente = false;
-  fcSConfirmado = false;
-  lecturaInicioMovimiento = 0;
-
-  logAccion(F("ERROR MARCHA"));
-
-  estadoActual = REPOSO;
-}
-
 // =============================================================================
-// EEPROM
+// FUNCIONES AUXILIARES RESTAURADAS DE LA V8.1.4
 // =============================================================================
 
 void cargarPosiciones() {
@@ -1041,10 +994,6 @@ void guardarPosEnEEPROM(Marcha m, uint16_t valorA, uint16_t valorB) {
   EEPROM.write(EEPROM_FIRMA_ADDR, EEPROM_FIRMA_VAL);
 }
 
-// =============================================================================
-// LEDS
-// =============================================================================
-
 uint8_t pinLED(Marcha m) {
   switch (m) {
     case MARCHA_R: return PIN_LED_R;
@@ -1079,60 +1028,6 @@ void manejarParpadeoGrave() {
     digitalWrite(PIN_LED_2, val);
 
     tiempoLed = ahora;
-  }
-}
-
-void gestionarLEDsNormal() {
-  if (estadoActual == ERROR_GRAVE) {
-    manejarParpadeoGrave();
-    return;
-  }
-
-  uint32_t ahora = millis();
-
-  bool maniobraActiva =
-      (estadoActual == ESPERANDO_FC_C ||
-       estadoActual == ESPERANDO_FC_S_PRINCIPAL ||
-       estadoActual == MOVIENDO ||
-       estadoActual == ESPERANDO_FC_S_CAMBIO_CARRIL ||
-       estadoActual == ESPERA_FC_S_RETORNO);
-
-  if (maniobraActiva) {
-    if ((ahora - tiempoLed) >= 250) {
-      ledEstado = !ledEstado;
-      tiempoLed = ahora;
-    }
-  } else {
-    ledEstado = false;
-  }
-
-  for (uint8_t i = 0; i < 4; i++) {
-    Marcha marcha = (Marcha)i;
-    bool parpadea = false;
-
-    if (errorMarcha[i]) {
-      parpadea = true;
-    }
-
-    if (maniobraActiva && marchaDestino == marcha) {
-      parpadea = true;
-    }
-
-    if (cancelacionVisualActiva && marchaCancelada == marcha) {
-      parpadea = true;
-    }
-
-    if (parpadea) {
-      digitalWrite(pinLED(marcha), ledEstado ? HIGH : LOW);
-    } else if (marchaActual == marcha) {
-      digitalWrite(pinLED(marcha), HIGH);
-    } else {
-      digitalWrite(pinLED(marcha), LOW);
-    }
-  }
-
-  if (cancelacionVisualActiva && !maniobraActiva) {
-    cancelacionVisualActiva = false;
   }
 }
 
@@ -1184,10 +1079,6 @@ void manejarParpadeoPotAlert() {
   potAlertState = false;
 }
 
-// =============================================================================
-// ESTADOS PRINCIPALES
-// =============================================================================
-
 void estadoArranque() {
   uint32_t ahora = millis();
 
@@ -1204,7 +1095,6 @@ void estadoArranque() {
     if (fcSCarrilPrincipal()) {
       marchaActual = MARCHA_N;
       marchaDestino = MARCHA_N;
-      cancelacionVisualActiva = false;
       errorMarcha[MARCHA_N] = false;
       estadoActual = REPOSO;
       logPosicionAlcanzada(MARCHA_N);
@@ -1224,51 +1114,6 @@ void estadoArranque() {
   if ((ahora - tiempoInicio) >= TIMEOUT_MS) {
     entrarErrorGrave();
   }
-}
-
-void iniciarCambioA(Marcha destino) {
-
-DBG(F("INICIAR CAMBIO | ORIGEN "));
-DBG_VAL(nombreMarcha(marchaActual));
-DBG(F(" | DESTINO "));
-DBGLN_VAL(nombreMarcha(destino));
-  
-  marchaOrigen = marchaActual;
-  marchaDestino = destino;
-
-  lecturaInicioMovimiento = potDoble.lecturaEfectiva;
-  tiempoInicio = millis();
-
-  movimientoEsN = (destino == MARCHA_N);
-  movimientoEsR = (destino == MARCHA_R);
-  cambioCarrilPendiente = (destino == MARCHA_R);
-  fcSConfirmado = false;
-
-  activarK1();
-  estadoActual = ESPERANDO_FC_C;
-
-  logCambioMarcha(marchaOrigen, marchaDestino);
-}
-
-void cancelarYRedirigir(Marcha nuevoDestino) {
-  if (nuevoDestino == marchaDestino) return;
-
-  marchaCancelada = marchaDestino;
-  cancelacionVisualActiva = true;
-
-  apagarActuador();
-  desactivarK2();
-
-  marchaDestino = nuevoDestino;
-  movimientoEsN = (nuevoDestino == MARCHA_N);
-  movimientoEsR = (nuevoDestino == MARCHA_R);
-  cambioCarrilPendiente = false;
-  fcSConfirmado = false;
-  lecturaInicioMovimiento = potDoble.lecturaEfectiva;
-  tiempoInicio = millis();
-
-  // No se considera error cancelar una maniobra.
-  iniciarCambioA(nuevoDestino);
 }
 
 void estadoReposo() {
@@ -1296,56 +1141,68 @@ void estadoReposo() {
   iniciarCambioA(nuevoDestino);
 }
 
+void gestionarLEDsNormal() {
+  if (estadoActual == ERROR_GRAVE) {
+    manejarParpadeoGrave();
+    return;
+  }
+
+  uint32_t ahora = millis();
+  bool maniobraActiva = (estadoActual == ESPERANDO_FC_C || estadoActual == MANIOBRA);
+
+  if (maniobraActiva) {
+    if ((ahora - tiempoLed) >= 250) {
+      ledEstado = !ledEstado;
+      tiempoLed = ahora;
+    }
+  } else {
+    ledEstado = false;
+  }
+
+  bool enN = enPosicion(posEfectiva(MARCHA_N));
+
+  for (uint8_t i = 0; i < 4; i++) {
+    Marcha marcha = (Marcha)i;
+    bool parpadea = errorMarcha[i];
+
+    if (maniobraActiva && marchaDestino == marcha) {
+      parpadea = true;
+    }
+
+    if (parpadea) {
+      digitalWrite(pinLED(marcha), ledEstado ? HIGH : LOW);
+      continue;
+    }
+
+    bool mostrarFijo;
+    if (maniobraActiva && marchaDestino != marchaActual && enN) {
+      mostrarFijo = (marcha == MARCHA_N);
+    } else {
+      mostrarFijo = (marcha == marchaActual);
+    }
+
+    digitalWrite(pinLED(marcha), mostrarFijo ? HIGH : LOW);
+  }
+}
+
+// =============================================================================
+// CONTROL DE MANIOBRAS NORMALES
+// =============================================================================
+
 void estadoEsperandoFCC() {
   uint32_t ahora = millis();
   Marcha nuevoDestino;
 
   if (obtenerNuevaOrden(nuevoDestino)) {
     marchaDestino = nuevoDestino;
+    resetearEstadoManiobra();
     logCambioMarcha(marchaOrigen, marchaDestino);
   }
 
   if (digitalRead(PIN_FC_C) == LOW) {
     logFCCambio(F("FC_C OK"));
-    tiempoInicio = ahora;
-
-    if (marchaDestino == MARCHA_1 ||
-        marchaDestino == MARCHA_2) {
-
-      if (fcSCarrilPrincipal()) {
-        iniciarMovimientoPosicion(marchaDestino);
-      } else {
-        estadoActual = ESPERANDO_FC_S_PRINCIPAL;
-      }
-
-      return;
-    }
-
-    if (marchaDestino == MARCHA_N) {
-      iniciarMovimientoPosicion(MARCHA_N);
-      return;
-    }
-
-    // Destino R:
-    // Si ya estamos en N, cambiamos inmediatamente al carril R.
-    if (enPosicion(posEfectiva(MARCHA_N))) {
-      apagarActuador();
-      lecturaInicioMovimiento = 0;
-      cambioCarrilPendiente = false;
-      fcSConfirmado = false;
-      activarK2();
-      estadoActual = ESPERANDO_FC_S_CAMBIO_CARRIL;
-      return;
-    }
-
-    // Aún no estamos en N.
-    // Conservamos marchaDestino = R para que estadoMoviendo()
-    // sepa que debe activar K2 al llegar a N.
-    cambioCarrilPendiente = true;
-    fcSConfirmado = false;
-    lecturaInicioMovimiento = potDoble.lecturaEfectiva;
-    tiempoInicio = ahora;
-    estadoActual = MOVIENDO;
+    resetearEstadoManiobra();
+    estadoActual = MANIOBRA;
     return;
   }
 
@@ -1355,31 +1212,350 @@ void estadoEsperandoFCC() {
   }
 }
 
-void estadoEsperandoFCSSPrincipal() {
-  uint32_t ahora = millis();
+void resetearEstadoManiobra() {
+  estadoSubmaniobra = MANIOBRA_INICIO;
+  tiempoInicio = millis();
+}
 
-  if (fcSCarrilPrincipal()) {
-    logFCCambio(F("FC_S PRINCIPAL OK"));
-    tiempoInicio = ahora;
-    iniciarMovimientoPosicion(marchaDestino);
+void iniciarCambioA(Marcha destino) {
+  DBG(F("INICIAR CAMBIO | ORIGEN "));
+  DBG_VAL(nombreMarcha(marchaActual));
+  DBG(F(" | DESTINO "));
+  DBGLN_VAL(nombreMarcha(destino));
+
+  marchaOrigen = marchaActual;
+  marchaDestino = destino;
+
+  lecturaInicioMovimiento = potDoble.lecturaEfectiva;
+  resetearEstadoManiobra();
+  activarK1();
+  estadoActual = ESPERANDO_FC_C;
+  logCambioMarcha(marchaOrigen, marchaDestino);
+}
+
+void iniciarIrAN() {
+  apagarActuador();
+  estadoSubmaniobra = MANIOBRA_IR_A_N;
+  tiempoInicio = millis();
+
+  if (enPosicion(posEfectiva(MARCHA_N))) {
+    estadoSubmaniobra = MANIOBRA_PAUSA_N;
+    tiempoInicio = millis();
     return;
   }
 
-  if ((ahora - tiempoInicio) >= TIMEOUT_MS) {
-    logAccion(F("ERROR GRAVE FC_S PRINCIPAL"));
-    entrarErrorGrave();
-    return;
-  }
+  moverHacia(posEfectiva(MARCHA_N));
+}
 
+void iniciarEsperaFCS() {
+  estadoSubmaniobra = MANIOBRA_ESPERAR_FC_S;
+  tiempoInicio = millis();
+}
+
+void iniciarMovimientoFinal(Marcha destino) {
+  estadoSubmaniobra = MANIOBRA_MOVER;
+  tiempoInicio = millis();
+  lecturaInicioMovimiento = potDoble.lecturaEfectiva;
+  moverHacia(posEfectiva(destino));
+}
+
+void procesarRedireccionManiobra() {
   Marcha nuevoDestino;
-  if (obtenerNuevaOrden(nuevoDestino)) {
-    cancelarYRedirigir(nuevoDestino);
+
+  if (!obtenerNuevaOrden(nuevoDestino)) return;
+  if (nuevoDestino == marchaDestino) return;
+
+  Marcha destinoAnterior = marchaDestino;
+  marchaDestino = nuevoDestino;
+
+  // K1 y FC_C permanecen activos/confirmados durante toda la maniobra.
+  if (digitalRead(PIN_K2) == HIGH && nuevoDestino != MARCHA_R) {
+    desactivarK2();
+  }
+
+  apagarActuador();
+  resetearEstadoManiobra();
+
+  DBG(F("REDIRECCION "));
+  DBG_VAL(nombreMarcha(destinoAnterior));
+  DBG(F(">"));
+  DBGLN_VAL(nombreMarcha(nuevoDestino));
+}
+
+void confirmarMarcha(Marcha marcha) {
+  apagarActuador();
+  desactivarK2();
+  desactivarK1();
+
+  marchaActual = marcha;
+  marchaDestino = marcha;
+  errorMarcha[marcha] = false;
+
+  resetearEstadoManiobra();
+  lecturaInicioMovimiento = 0;
+  estadoActual = REPOSO;
+
+  logPosicionAlcanzada(marcha);
+}
+
+void registrarErrorMarcha(Marcha marcha) {
+  apagarActuador();
+  desactivarK2();
+  desactivarK1();
+
+  errorMarcha[marcha] = true;
+  marchaDestino = marchaActual;
+
+  resetearEstadoManiobra();
+  lecturaInicioMovimiento = 0;
+  estadoActual = REPOSO;
+
+  logAccion(F("ERROR MARCHA"));
+}
+
+void maniobraN() {
+  if (enPosicion(posEfectiva(MARCHA_N))) {
+    confirmarMarcha(MARCHA_N);
+    return;
+  }
+
+  moverHacia(posEfectiva(MARCHA_N));
+
+  if ((millis() - tiempoInicio) >= TIMEOUT_MS) {
+    registrarErrorMarcha(MARCHA_N);
   }
 }
 
-void estadoMoviendo() {
-  uint32_t ahora = millis();
+void maniobraR() {
+  switch (estadoSubmaniobra) {
+    case MANIOBRA_INICIO:
+      if (fcSCarrilR()) {
+        iniciarMovimientoFinal(MARCHA_R);
+      } else {
+        iniciarIrAN();
+      }
+      return;
 
+    case MANIOBRA_IR_A_N:
+      if (enPosicion(posEfectiva(MARCHA_N))) {
+        apagarActuador();
+        estadoSubmaniobra = MANIOBRA_PAUSA_N;
+        tiempoInicio = millis();
+        return;
+      }
+      moverHacia(posEfectiva(MARCHA_N));
+      if ((millis() - tiempoInicio) >= TIMEOUT_MS) {
+        registrarErrorMarcha(MARCHA_R);
+      }
+      return;
+
+    case MANIOBRA_PAUSA_N:
+      apagarActuador();
+      if ((millis() - tiempoInicio) < TIEMPO_PAUSA_N) return;
+      if (marchaDestino != MARCHA_R) {
+        estadoSubmaniobra = MANIOBRA_INICIO;
+        return;
+      }
+      activarK2();
+      iniciarEsperaFCS();
+      return;
+
+    case MANIOBRA_ESPERAR_FC_S:
+      if (marchaDestino != MARCHA_R) {
+        desactivarK2();
+        estadoSubmaniobra = MANIOBRA_INICIO;
+        return;
+      }
+      if (fcSCarrilR()) {
+        logFCCambio(F("FC_S R OK"));
+        iniciarMovimientoFinal(MARCHA_R);
+        return;
+      }
+      if ((millis() - tiempoInicio) >= TIMEOUT_MS) {
+        desactivarK2();
+        entrarErrorGrave();
+      }
+      return;
+
+    case MANIOBRA_MOVER:
+      if (marchaDestino != MARCHA_R) {
+        estadoSubmaniobra = MANIOBRA_INICIO;
+        return;
+      }
+      if (!fcSCarrilR()) {
+        apagarActuador();
+        estadoSubmaniobra = MANIOBRA_INICIO;
+        return;
+      }
+      if (enPosicion(posEfectiva(MARCHA_R))) {
+        confirmarMarcha(MARCHA_R);
+        return;
+      }
+      moverHacia(posEfectiva(MARCHA_R));
+      if ((millis() - tiempoInicio) >= TIMEOUT_MS) {
+        registrarErrorMarcha(MARCHA_R);
+      }
+      return;
+  }
+}
+
+void maniobra1() {
+  switch (estadoSubmaniobra) {
+    case MANIOBRA_INICIO: {
+      if (!fcSCarrilPrincipal()) {
+        iniciarIrAN();
+        return;
+      }
+      uint16_t p = leerPot();
+      uint16_t n = posEfectiva(MARCHA_N);
+      uint16_t dos = posEfectiva(MARCHA_2);
+      if (p >= n && p <= dos) {
+        iniciarIrAN();
+        return;
+      }
+      iniciarMovimientoFinal(MARCHA_1);
+      return;
+    }
+
+    case MANIOBRA_IR_A_N:
+      if (enPosicion(posEfectiva(MARCHA_N))) {
+        apagarActuador();
+        estadoSubmaniobra = MANIOBRA_PAUSA_N;
+        tiempoInicio = millis();
+        return;
+      }
+      moverHacia(posEfectiva(MARCHA_N));
+      if ((millis() - tiempoInicio) >= TIMEOUT_MS) {
+        registrarErrorMarcha(MARCHA_1);
+      }
+      return;
+
+    case MANIOBRA_PAUSA_N:
+      apagarActuador();
+      if ((millis() - tiempoInicio) < TIEMPO_PAUSA_N) return;
+      if (marchaDestino != MARCHA_1) {
+        estadoSubmaniobra = MANIOBRA_INICIO;
+        return;
+      }
+      iniciarEsperaFCS();
+      return;
+
+    case MANIOBRA_ESPERAR_FC_S:
+      if (marchaDestino != MARCHA_1) {
+        estadoSubmaniobra = MANIOBRA_INICIO;
+        return;
+      }
+      if (fcSCarrilPrincipal()) {
+        logFCCambio(F("FC_S PRINCIPAL OK"));
+        iniciarMovimientoFinal(MARCHA_1);
+        return;
+      }
+      if ((millis() - tiempoInicio) >= TIMEOUT_MS) {
+        entrarErrorGrave();
+      }
+      return;
+
+    case MANIOBRA_MOVER:
+      if (marchaDestino != MARCHA_1) {
+        estadoSubmaniobra = MANIOBRA_INICIO;
+        return;
+      }
+      if (!fcSCarrilPrincipal()) {
+        apagarActuador();
+        estadoSubmaniobra = MANIOBRA_INICIO;
+        return;
+      }
+      if (enPosicion(posEfectiva(MARCHA_1))) {
+        confirmarMarcha(MARCHA_1);
+        return;
+      }
+      moverHacia(posEfectiva(MARCHA_1));
+      if ((millis() - tiempoInicio) >= TIMEOUT_MS) {
+        registrarErrorMarcha(MARCHA_1);
+      }
+      return;
+  }
+}
+
+void maniobra2() {
+  switch (estadoSubmaniobra) {
+    case MANIOBRA_INICIO: {
+      if (!fcSCarrilPrincipal()) {
+        iniciarIrAN();
+        return;
+      }
+      uint16_t p = leerPot();
+      uint16_t uno = posEfectiva(MARCHA_1);
+      uint16_t n = posEfectiva(MARCHA_N);
+      if (p >= uno && p <= n) {
+        iniciarIrAN();
+        return;
+      }
+      iniciarMovimientoFinal(MARCHA_2);
+      return;
+    }
+
+    case MANIOBRA_IR_A_N:
+      if (enPosicion(posEfectiva(MARCHA_N))) {
+        apagarActuador();
+        estadoSubmaniobra = MANIOBRA_PAUSA_N;
+        tiempoInicio = millis();
+        return;
+      }
+      moverHacia(posEfectiva(MARCHA_N));
+      if ((millis() - tiempoInicio) >= TIMEOUT_MS) {
+        registrarErrorMarcha(MARCHA_2);
+      }
+      return;
+
+    case MANIOBRA_PAUSA_N:
+      apagarActuador();
+      if ((millis() - tiempoInicio) < TIEMPO_PAUSA_N) return;
+      if (marchaDestino != MARCHA_2) {
+        estadoSubmaniobra = MANIOBRA_INICIO;
+        return;
+      }
+      iniciarEsperaFCS();
+      return;
+
+    case MANIOBRA_ESPERAR_FC_S:
+      if (marchaDestino != MARCHA_2) {
+        estadoSubmaniobra = MANIOBRA_INICIO;
+        return;
+      }
+      if (fcSCarrilPrincipal()) {
+        logFCCambio(F("FC_S PRINCIPAL OK"));
+        iniciarMovimientoFinal(MARCHA_2);
+        return;
+      }
+      if ((millis() - tiempoInicio) >= TIMEOUT_MS) {
+        entrarErrorGrave();
+      }
+      return;
+
+    case MANIOBRA_MOVER:
+      if (marchaDestino != MARCHA_2) {
+        estadoSubmaniobra = MANIOBRA_INICIO;
+        return;
+      }
+      if (!fcSCarrilPrincipal()) {
+        apagarActuador();
+        estadoSubmaniobra = MANIOBRA_INICIO;
+        return;
+      }
+      if (enPosicion(posEfectiva(MARCHA_2))) {
+        confirmarMarcha(MARCHA_2);
+        return;
+      }
+      moverHacia(posEfectiva(MARCHA_2));
+      if ((millis() - tiempoInicio) >= TIMEOUT_MS) {
+        registrarErrorMarcha(MARCHA_2);
+      }
+      return;
+  }
+}
+
+void ejecutarManiobra() {
   if (timeoutK2) {
     timeoutK2 = false;
     if (marchaDestino == MARCHA_R) {
@@ -1390,208 +1566,21 @@ void estadoMoviendo() {
     return;
   }
 
-  // Nueva orden mientras se está moviendo.
-  Marcha nuevoDestino;
-  if (obtenerNuevaOrden(nuevoDestino)) {
+  procesarRedireccionManiobra();
+  if (estadoActual != MANIOBRA) return;
 
-    // N -> R: solo se puede cancelar hacia N.
-    if (marchaDestino == MARCHA_R) {
-      if (nuevoDestino == MARCHA_N) {
-        cancelarYRedirigir(MARCHA_N);
-      }
-      return;
-    }
-
-    // R -> N: hasta confirmar N no se permite redirigir la maniobra.
-    if (marchaOrigen == MARCHA_R &&
-        marchaDestino == MARCHA_N) {
-      return;
-    }
-
-    cancelarYRedirigir(nuevoDestino);
-    return;
-  }
-
-  // ---------------------------------------------------------------------------
-  // Destino N
-  // ---------------------------------------------------------------------------
-
-  if (marchaDestino == MARCHA_N) {
-
-    if (enPosicion(posEfectiva(MARCHA_N))) {
-      apagarActuador();
-      lecturaInicioMovimiento = 0;
-
-      // Solo R -> N necesita esperar el retorno de FC_S al carril principal.
-      if (marchaOrigen == MARCHA_R) {
-        tiempoInicio = ahora;
-        estadoActual = ESPERA_FC_S_RETORNO;
-      } else {
-        confirmarMarcha(MARCHA_N);
-      }
-
-      return;
-    }
-
-    moverHacia(posEfectiva(MARCHA_N));
-
-    if ((ahora - tiempoInicio) >= TIMEOUT_MS) {
-      registrarErrorMarcha(MARCHA_N);
-    }
-
-    return;
-  }
-
-  // ---------------------------------------------------------------------------
-  // Destino R: primera fase N -> cambio de carril -> R
-  // ---------------------------------------------------------------------------
-
-  if (marchaDestino == MARCHA_R && cambioCarrilPendiente) {
-
-    if (enPosicion(posEfectiva(MARCHA_N))) {
-      apagarActuador();
-      lecturaInicioMovimiento = 0;
-      tiempoInicio = ahora;
-      activarK2();
-      estadoActual = ESPERANDO_FC_S_CAMBIO_CARRIL;
-      return;
-    }
-
-    moverHacia(posEfectiva(MARCHA_N));
-
-    if ((ahora - tiempoInicio) >= TIMEOUT_MS) {
-      registrarErrorMarcha(MARCHA_R);
-    }
-
-    return;
-  }
-
-  // ---------------------------------------------------------------------------
-  // Destino R: desplazamiento longitudinal dentro del carril R
-  // ---------------------------------------------------------------------------
-
-  if (marchaDestino == MARCHA_R) {
-
-    if (enPosicion(posEfectiva(MARCHA_R))) {
-      apagarActuador();
-      confirmarMarcha(MARCHA_R);
-      return;
-    }
-
-    moverHacia(posEfectiva(MARCHA_R));
-
-    if ((ahora - tiempoInicio) >= TIMEOUT_MS) {
-      registrarErrorMarcha(MARCHA_R);
-    }
-
-    return;
-  }
-
-  // ---------------------------------------------------------------------------
-  // Destino 1ª o 2ª
-  // ---------------------------------------------------------------------------
-
-  if (!fcSCarrilPrincipal()) {
-    registrarErrorMarcha(marchaDestino);
-    return;
-  }
-
-  if (enPosicion(posEfectiva(marchaDestino))) {
-    apagarActuador();
-    confirmarMarcha(marchaDestino);
-    return;
-  }
-
-  moverHacia(posEfectiva(marchaDestino));
-
-  if ((ahora - tiempoInicio) >= TIMEOUT_MS) {
-    registrarErrorMarcha(marchaDestino);
-  }
-}
-
-void estadoEsperandoFCSCambioCarril() {
-  uint32_t ahora = millis();
-
-  // Un timeout de K2 tiene prioridad absoluta sobre cualquier orden.
-  if (timeoutK2) {
-    timeoutK2 = false;
-    entrarErrorGrave();
-    return;
-  }
-
-  // Durante este estado K2 está activo y todavía estamos físicamente en N.
-  Marcha nuevoDestino;
-  if (obtenerNuevaOrden(nuevoDestino)) {
-    // La única cancelación válida durante N -> R es volver a N.
-    if (nuevoDestino == MARCHA_N) {
-      marchaCancelada = marchaDestino;
-      cancelacionVisualActiva = true;
-
-      apagarActuador();
-      desactivarK2();
-
-      marchaDestino = MARCHA_N;
-      movimientoEsN = true;
-      movimientoEsR = false;
-      cambioCarrilPendiente = false;
-      fcSConfirmado = false;
-      lecturaInicioMovimiento = potDoble.lecturaEfectiva;
-      tiempoInicio = ahora;
-
-      estadoActual = ESPERA_FC_S_RETORNO;
-      return;
-    }
-  }
-
-  if (fcSCarrilR()) {
-    logFCCambio(F("FC_S R OK"));
-    fcSConfirmado = true;
-    cambioCarrilPendiente = false;
-    lecturaInicioMovimiento = potDoble.lecturaEfectiva;
-    tiempoInicio = ahora;
-    iniciarMovimientoPosicion(MARCHA_R);
-    return;
-  }
-
-  if ((ahora - tiempoInicio) >= TIMEOUT_MS) {
-    desactivarK2();
-    entrarErrorGrave();
-  }
-}
-
-void estadoEsperaFCSRetorno() {
-  uint32_t ahora = millis();
-
-  // Puede venir de cualquier origen. Si todavía no estamos longitudinalmente
-  // en N, continuamos hacia N; una vez en N solo esperamos FC_S HIGH.
-  if (!enPosicion(posEfectiva(MARCHA_N))) {
-    moverHacia(posEfectiva(MARCHA_N));
-
-    if ((ahora - tiempoInicio) >= TIMEOUT_MS) {
-      registrarErrorMarcha(MARCHA_N);
-    }
-    return;
-  }
-
-  apagarActuador();
-
-  if (fcSCarrilPrincipal()) {
-    confirmarMarcha(MARCHA_N);
-    return;
-  }
-
-  if ((ahora - tiempoInicio) >= TIMEOUT_MS) {
-    registrarErrorMarcha(MARCHA_N);
+  switch (marchaDestino) {
+    case MARCHA_R: maniobraR(); break;
+    case MARCHA_N: maniobraN(); break;
+    case MARCHA_1: maniobra1(); break;
+    case MARCHA_2: maniobra2(); break;
   }
 }
 
 void entrarErrorGrave() {
   apagarTodoReles();
   timeoutK2 = false;
-  movimientoEsN = false;
-  movimientoEsR = false;
-  cambioCarrilPendiente = false;
-  fcSConfirmado = false;
+  resetearEstadoManiobra();
   lecturaInicioMovimiento = 0;
   ledEstado = false;
   tiempoLed = millis();
@@ -1622,10 +1611,6 @@ const __FlashStringHelper* nombreEstado(Estado estado) {
     case ARRANQUE: return F("ARRANQUE");
     case REPOSO: return F("REPOSO");
     case ESPERANDO_FC_C: return F("ESPERANDO_FC_C");
-    case ESPERANDO_FC_S_PRINCIPAL: return F("ESPERANDO_FC_S_PRINCIPAL");
-    case MOVIENDO: return F("MOVIENDO");
-    case ESPERANDO_FC_S_CAMBIO_CARRIL: return F("ESPERANDO_FC_S_CAMBIO_CARRIL");
-    case ESPERA_FC_S_RETORNO: return F("ESPERA_FC_S_RETORNO");
     case ERROR_GRAVE: return F("ERROR_GRAVE");
     case MODO_APRENDIZAJE: return F("MODO_APRENDIZAJE");
     case APRENDIZAJE_IR_A_2: return F("APRENDIZAJE_IR_A_2");
@@ -1673,7 +1658,7 @@ void printResetCause() {
 
 void printDiagnosticoInicial() {
 #if DEBUG
-  DBGLN(F("VERSION V8.1.4"));
+  DBGLN(F("VERSION V8.2"));
   printResetCause();
 
   DBG(F("EEP R")); DBG_VAL(posADC_A[MARCHA_R]); DBG(F("/")); DBG_VAL(posADC_B[MARCHA_R]);
