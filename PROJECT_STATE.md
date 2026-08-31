@@ -1,39 +1,27 @@
 # PROJECT_STATE — Proyecto Trike
 
-**Versión de referencia:** v8.1.4  
-**Código principal:** `Proyecto_trike_v8.ino`  
+**Versión de referencia:** v8.3  
+**Código principal:** `Proyecto_trike_v8_3.ino`  
+**Base funcional:** V8.2.5  
 **Rama:** `main`
 
 ## Fuente de verdad
 
-El código actual de GitHub es la fuente principal del estado del software. Si este archivo contradice al código, prevalece el código.
+El código actual de GitHub es la fuente principal. Si este archivo contradice al firmware, prevalece el código.
 
-Antes de analizar o modificar el firmware:
+Antes de modificar el firmware:
 
 1. Leer este archivo.
-2. Leer el código actual de GitHub en `main`.
-3. Localizar las funciones y dependencias afectadas.
+2. Leer el código actual de GitHub.
+3. Revisar las funciones y dependencias afectadas.
 
-No utilizar versiones antiguas, archivos de otros proyectos ni memoria no confirmada para tomar decisiones técnicas.
-
-No escribir cambios en GitHub sin autorización explícita del usuario.
-
-## Estado actual
-
-- Firmware V8.1.4.
-- Código principal en un único archivo `.ino`.
-- Arquitectura basada en máquina de estados no bloqueante para la lógica normal.
-- Control de cuatro posiciones: R, N, 1 y 2.
-- Potenciómetro doble redundante para control de posición.
-- Posiciones de ambas pistas almacenadas en EEPROM.
-- Gestión de relés, finales de carrera, LEDs, diagnóstico serie y modo de aprendizaje.
-- La V8 elimina la recuperación automática normal hacia N tras un fallo de posicionamiento: el sistema se detiene, registra error en la marcha objetivo y permite nuevas órdenes cuando la seguridad lo permite.
+No usar versiones antiguas, otros proyectos ni memoria no confirmada para completar datos técnicos.
 
 ## Microcontrolador
 
 - Arduino Nano / ATmega328P.
 
-## Pinout
+## Pinout actual
 
 | Función | Pin |
 |---|---:|
@@ -43,21 +31,21 @@ No escribir cambios en GitHub sin autorización explícita del usuario.
 | Relé movimiento OUT | D5 |
 | K2 | D6 |
 | LED R | D7 |
-| LED N | D8 |
+| K1 | D8 |
 | LED 1 | D9 |
 | LED 2 | D10 |
 | BTN MODO | D11 |
 | BTN CONF | D12 |
-| K1 | D13 |
+| LED N | D13 |
 | Potenciómetro A | A0 |
 | FC_S | A1 |
 | FC_C | A2 |
 | Potenciómetro B | A3 |
 | LED aviso potenciómetro | A4 |
 
-## Marchas
+## Posiciones
 
-Enumeración:
+Enumeración de software:
 
 - `MARCHA_R`
 - `MARCHA_N`
@@ -66,24 +54,33 @@ Enumeración:
 
 Orden físico longitudinal confirmado:
 
-`R ↔ N ↔ 1 ↔ 2`
+`R ↔ 1 ↔ N ↔ 2`
 
-No se realizan saltos directos físicamente imposibles.
+La escala normalizada de las pistas usa ese orden físico.
 
 ## Máquina de estados normal
 
-Estados actuales:
+Estados actuales en el firmware V8.2.5/V8.3:
 
 - `ARRANQUE`
 - `REPOSO`
 - `ESPERANDO_FC_C`
-- `ESPERANDO_FC_S_PRINCIPAL`
-- `MOVIENDO`
-- `ESPERANDO_FC_S_CAMBIO_CARRIL`
-- `ESPERA_FC_S_RETORNO`
+- `MANIOBRA`
 - `ERROR_GRAVE`
 
-También existen estados independientes del modo de aprendizaje:
+Subestados de maniobra:
+
+- `MANIOBRA_INICIO`
+- `MANIOBRA_IR_A_N`
+- `MANIOBRA_PAUSA_N`
+- `MANIOBRA_ESPERAR_FC_S`
+- `MANIOBRA_MOVER`
+
+Las maniobras `R`, `N`, `1` y `2` tienen funciones independientes y pueden redirigirse durante el movimiento mediante las órdenes normales UP/DOWN.
+
+## Máquina de aprendizaje
+
+Estados actuales:
 
 - `MODO_APRENDIZAJE`
 - `APRENDIZAJE_IR_A_2`
@@ -93,217 +90,108 @@ También existen estados independientes del modo de aprendizaje:
 - `APRENDIZAJE_RECUPERANDO`
 - `APRENDIZAJE_CONFIRMANDO`
 
-## Lógica normal de cambios
-
-### N → 1 / N → 2
-
-1. Activar K1.
-2. Esperar `FC_C`.
-3. Comprobar `FC_S HIGH` antes del movimiento longitudinal.
-4. Si no está confirmado, esperar en `ESPERANDO_FC_S_PRINCIPAL`.
-5. Mover hacia la posición objetivo.
-6. Confirmar la marcha al alcanzar la posición.
-
-Si `FC_C` o `FC_S HIGH` no se confirman dentro del timeout correspondiente, se entra en `ERROR_GRAVE`.
-
-### 1 / 2 → N
-
-1. Activar K1.
-2. Esperar `FC_C`.
-3. Mover longitudinalmente hacia N.
-4. Confirmar N directamente al alcanzar su posición.
-
-No se espera `FC_S` para confirmar el retorno desde 1 o 2, porque ya se parte del carril principal.
-
-### N → R
-
-1. Activar K1.
-2. Esperar `FC_C`.
-3. Mover hacia N si todavía no se está en N.
-4. Al llegar a N, detener el actuador.
-5. Activar K2.
-6. Esperar que `FC_S` pase a LOW, confirmando carril R.
-7. Mantener K2 activo durante esta espera.
-8. Mover longitudinalmente hacia R.
-9. Confirmar R y desactivar K1/K2.
-
-Un timeout de K2 o la imposibilidad de confirmar el cambio de carril hacia R se consideran errores graves.
-
-### R → N
-
-1. Activar K1.
-2. Esperar `FC_C`.
-3. Mover longitudinalmente hacia N.
-4. Al alcanzar la posición de N, detener el actuador.
-5. Entrar en `ESPERA_FC_S_RETORNO`.
-6. Reiniciar `tiempoInicio` al entrar en este estado.
-7. Esperar `FC_S HIGH`, confirmando el retorno al carril principal.
-8. Confirmar N.
-
-Solo la maniobra `R → N` utiliza actualmente `ESPERA_FC_S_RETORNO` como parte de la confirmación normal de N.
-
-## Cancelación y redirección
-
-Durante una maniobra pueden recibirse nuevas órdenes.
-
-Reglas relevantes:
-
-- La lógica de órdenes utiliza `marchaDestino` para calcular el siguiente destino.
-- `UP + DOWN` establece N como objetivo.
-- Cancelar una maniobra no genera por sí mismo un error de marcha.
-- Durante `N → R`, la cancelación permitida es volver a N.
-- Durante `R → N`, no se permite redirigir hasta confirmar N.
-- Las demás maniobras pueden cancelarse y redirigirse según la lógica de transiciones físicas.
-- Al cancelar se detiene el actuador, se desactiva K2 y se reinicia la maniobra hacia el nuevo objetivo.
-
-## Relés y temporización
-
-- `K1`: se activa al iniciar una maniobra normal y se desactiva al confirmar marcha, registrar error de marcha o entrar en error grave.
-- `K2`: se utiliza para el cambio de carril hacia R.
-- `TIEMPO_MAX_K2 = 3000 ms`.
-- `TIMEOUT_MS = 3000 ms`.
-- `TIEMPO_MUERTO_INVERSION_MS = 150 ms`.
-- Las inversiones entre IN y OUT pasan por un tiempo muerto.
-- `vigilarK2()` genera `timeoutK2` si K2 permanece activo más de su tiempo máximo.
+El modo aprendizaje conserva la lógica específica de calibración y almacenamiento de las posiciones A/B en EEPROM.
 
 ## Potenciómetro doble
 
 - Pista A: A0.
 - Pista B: A3.
-- Se promedian 5 muestras por lectura.
-- Se supervisan ambas pistas individualmente.
-- El sistema puede detectar, entre otros:
-  - lectura fuera de rango;
-  - salto errático;
-  - pista congelada;
-  - dirección incorrecta;
-  - discrepancia entre pistas;
-  - pista deshabilitada por EEPROM.
-- Existe selección de pista activa y lógica de rehabilitación.
-- Si ambas pistas fallan, no se puede garantizar la posición y se aplica la lógica de seguridad correspondiente.
-- `posEfectiva()` selecciona la posición almacenada correspondiente a la pista válida/activa.
-- `lecturaEfectiva` es la referencia usada para el control de posición.
+- Lectura efectiva para funcionamiento normal seleccionada mediante la lógica de redundancia.
+- Se detectan fallos de rango, saltos erráticos, congelación, dirección incorrecta y discrepancia entre pistas.
+- Si ambas pistas quedan falladas se entra en `ERROR_GRAVE`.
+- Existe rehabilitación de pistas fuera del modo aprendizaje.
 
-## Posiciones por defecto
+## Relés y temporización
 
-Pista A:
+- `K1`: se activa al iniciar una maniobra normal y se desactiva al finalizarla según la lógica existente.
+- `K2`: utilizado en las secuencias que requieren cambio de carril hacia R.
+- `TIEMPO_MAX_K2 = 3000 ms`.
+- `TIMEOUT_MS = 3000 ms`.
+- `TIEMPO_MUERTO_INVERSION_MS = 150 ms` entre inversiones IN/OUT.
 
-- R: 334
-- N: 703
-- 1: 461
-- 2: 874
+## Interfaz de pruebas serie V8.3
 
-Pista B:
+Puerto serie: 9600 baudios.
 
-- R: 338
-- N: 709
-- 1: 468
-- 2: 878
+Los comandos son **independientes de mayúsculas/minúsculas** y se terminan con ENTER.
 
-Las posiciones reales pueden ser sustituidas mediante el modo de aprendizaje y almacenadas en EEPROM.
+### Consultas
 
-## Parámetros relevantes
+- `HELP` — muestra todos los comandos disponibles.
+- `STATUS` — diagnóstico completo del sistema.
+- `POS` — posiciones A/B almacenadas en EEPROM.
 
-- `DEBOUNCE_MS = 20`
-- `VENTANA_DOBLE_PULSACION_MS = 120`
-- `TIEMPO_PULSACION_LARGA_MS = 600`
-- `TIMEOUT_MS = 3000`
-- `TIEMPO_MUERTO_INVERSION_MS = 150`
-- `TIEMPO_MAX_K2 = 3000`
-- `TIEMPO_LECTURA_POT = 20`
-- `TOLERANCIA_ADC = 25`
-- `TIEMPO_VERIFICACION_POT = 25`
-- `NUM_MUESTRAS_PROMEDIO = 5`
-- `RANGO_MIN_ADC = 10`
-- `RANGO_MAX_ADC = 1013`
+### Movimiento por ADC
 
-## Errores de marcha
+- `ADC A x` — mover hacia `x` usando exclusivamente la pista A como referencia de posición.
+- `ADC B x` — mover hacia `x` usando exclusivamente la pista B como referencia de posición.
+- `x` permitido: `0..1023`.
 
-Existe un error independiente para:
+Estas órdenes son herramientas de prueba: no cambian permanentemente la pista activa de la redundancia.
 
-- R
-- N
-- 1
-- 2
+### Movimiento temporal
 
-Un fallo normal al alcanzar una marcha:
+- `MOVE IN x` — activar IN durante `x` ms.
+- `MOVE OUT x` — activar OUT durante `x` ms.
 
-1. detiene IN/OUT;
-2. desactiva K1/K2;
-3. registra error en la marcha objetivo;
-4. no realiza recuperación automática hacia N;
-5. vuelve a `REPOSO`.
+La inversión respeta el tiempo muerto existente de 150 ms.
 
-El error de una marcha se borra al confirmar posteriormente esa misma marcha o al reiniciar.
+### Maniobra directa por marcha
 
-## Error grave
+- `G R`
+- `G N`
+- `G 1`
+- `G 2`
 
-`ERROR_GRAVE`:
+`G` utiliza la lógica normal de maniobras y la redundancia A/B. Permite pedir directamente cualquier marcha; la máquina determina si debe pasar por N, esperar FC_S, activar K1/K2, etc.
 
-- detiene todos los relés;
-- desactiva K1 y K2;
-- limpia banderas internas de maniobra;
-- hace parpadear los cuatro LEDs;
-- requiere reinicio.
+Cuando `G` se ejecuta desde aprendizaje, se utiliza temporalmente la máquina normal y, si termina correctamente, se vuelve al modo aprendizaje.
 
-Entre las condiciones actuales se encuentran:
+### K1
 
-- timeout o ausencia de confirmación imprescindible de `FC_C`;
-- imposibilidad de confirmar el carril principal antes de N → 1/2;
-- timeout de K2 durante N → R;
-- otras condiciones que impidan garantizar una posición o maniobra segura.
+- `K1 x` — activar K1 durante `x` ms.
+- `K1 ON` — activar K1 indefinidamente.
+- `K1 OFF` — desactivar K1.
 
-## Finales de carrera
+Una maniobra automática posterior vuelve a controlar K1 mediante su lógica normal.
 
-- `FC_C` se considera confirmado cuando está LOW.
-- `FC_S HIGH` indica carril principal 2-N-1.
-- `FC_S LOW` indica carril R.
+### K2
 
-## LEDs
+- `K2 x` — activar K2 durante `x` ms, limitado por `TIEMPO_MAX_K2`.
+- `K2 ON` — activar K2; se mantiene el timeout normal de 3000 ms.
+- `K2 OFF` — desactivar K2.
 
-- LED fijo: marcha actualmente confirmada.
-- LED parpadeando: marcha objetivo durante maniobra, marcha con error almacenado o indicación temporal de cancelación.
-- Pueden parpadear varios LEDs simultáneamente por errores acumulados.
+### Control
 
-## Diagnóstico serie
+- `STOP` — detiene pruebas/maniobra y apaga IN, OUT, K1 y K2. Si el modo aprendizaje sigue seleccionado, deja el sistema en `MODO_APRENDIZAJE`.
+- `RESET` / `R` — reinicia los contadores de diagnóstico no latched y actualiza las lecturas de potenciómetros.
 
-- Puerto serie a 9600 baudios.
-- `DEBUG` está actualmente activo.
-- El comando `D` muestra diagnóstico del sistema.
-- Se registran, entre otros:
-  - versión;
-  - posiciones EEPROM;
-  - lecturas de potenciómetros;
-  - estado;
-  - marcha actual, destino y origen;
-  - FC_C y FC_S;
-  - K1, K2, IN y OUT;
-  - errores de marcha.
+## Prioridad de órdenes de movimiento
 
-## Modo de aprendizaje
+Para el mismo recurso físico de movimiento longitudinal, una nueva orden sustituye la anterior.
 
-Se mantiene un modo de aprendizaje/calibración separado de la lógica normal.
+Ejemplo:
 
-Permite aprender y guardar las posiciones de:
+`ADC A 500` → movimiento hacia 500  
+`UP` → se detiene la prueba ADC y pasa a la orden normal de UP.
 
-- R
-- N
-- 1
-- 2
+Serie y botones pueden utilizarse simultáneamente.
 
-La revisión exhaustiva pendiente debe analizar el modo normal y el modo de aprendizaje por separado.
+## Comandos durante aprendizaje
 
-## Estado de validación
+Los comandos de prueba serie no se bloquean por estar en aprendizaje.
 
-La lógica actual V8.1.4 incorpora las últimas correcciones de transición:
+- `ADC A/B` y `MOVE` toman temporalmente el control del actuador y dejan el aprendizaje en `MODO_APRENDIZAJE` para evitar que la maniobra automática previa recupere el actuador por sorpresa.
+- `G` utiliza temporalmente la máquina normal de maniobras y vuelve al aprendizaje al terminar correctamente.
+- `K1`, `K2`, `STOP`, `STATUS`, `POS` y `HELP` están disponibles durante aprendizaje.
 
-1. `MOVIENDO` solo entra en `ESPERA_FC_S_RETORNO` para `R → N`.
-2. `tiempoInicio` se reinicia al entrar en `ESPERA_FC_S_RETORNO`.
-3. N → 1/2 verifica `FC_S HIGH` antes del movimiento longitudinal.
-4. 1/2 → N confirma N directamente por posición, sin espera innecesaria de retorno de `FC_S`.
-5. N → R espera la transición de `FC_S` a LOW después de activar K2.
+Durante aprendizaje, la confirmación de una posición sigue almacenando las lecturas actuales A/B para la marcha seleccionada.
 
-Pendiente principal: realizar una validación sistemática y exhaustiva de la lógica normal V8.1.4, incluyendo estados, transiciones, órdenes simultáneas, cancelaciones, redirecciones, sensores, relés, timeouts y reinicios, antes de considerar la lógica completamente validada en pruebas físicas.
+## Validación V8.3
+
+- Generación realizada a partir del firmware V8.2.5.
+- Compilación realizada correctamente con `arduino:avr:uno` usando Arduino CLI y core AVR.
+- Esta compilación verifica sintaxis y compatibilidad de compilación del firmware; no sustituye las pruebas físicas del actuador, relés, finales de carrera y sensores.
 
 ## Regla de modificación
 
@@ -312,5 +200,4 @@ Antes de modificar el firmware:
 1. Leer el código actual de GitHub.
 2. Localizar la función y el bloque afectados.
 3. Revisar dependencias y efectos temporales.
-4. No utilizar memoria ni versiones antiguas para completar datos no confirmados.
-5. Aplicar validación sistemática cuando se solicite revisar o validar la lógica.
+4. Aplicar validación sistemática cuando se solicite comprobar la lógica.
