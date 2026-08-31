@@ -1,6 +1,6 @@
 // =============================================================================
-// SELECTOR DE MARCHAS VW AUTOSTICK — V8.2.4
-// Base: v8.2.3 — normalización y redundancia de potenciómetros
+// SELECTOR DE MARCHAS VW AUTOSTICK — V8.2.5Intercambio de pin K1(D13) por Led N(D8)
+// Base: v8.2.4 — Redundancia mejorada
 // =============================================================================
 
 #include <EEPROM.h>
@@ -83,12 +83,12 @@ const uint8_t PIN_REL_IN        = 4;
 const uint8_t PIN_REL_OUT       = 5;
 const uint8_t PIN_K2            = 6;
 const uint8_t PIN_LED_R         = 7;
-const uint8_t PIN_LED_N         = 8;
+const uint8_t PIN_LED_N         = 13;
 const uint8_t PIN_LED_1         = 9;
 const uint8_t PIN_LED_2         = 10;
 const uint8_t PIN_BTN_MODO      = 11;
 const uint8_t PIN_BTN_CONF      = 12;
-const uint8_t PIN_K1            = 13;
+const uint8_t PIN_K1            = 8;
 const uint8_t PIN_POT_A         = A0;
 const uint8_t PIN_POT_B         = A3;
 const uint8_t PIN_FC_S          = A1;
@@ -1750,7 +1750,7 @@ void printResetCause() {
 
 void printDiagnosticoInicial() {
 #if DEBUG
-  DBGLN(F("VERSION V8.2.4"));
+  DBGLN(F("VERSION V8.2.5"));
   printResetCause();
 
   DBG(F("EEP R")); DBG_VAL(posADC_A[MARCHA_R]); DBG(F("/")); DBG_VAL(posADC_B[MARCHA_R]);
