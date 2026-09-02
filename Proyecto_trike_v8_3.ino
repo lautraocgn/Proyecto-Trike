@@ -1,6 +1,6 @@
 // =============================================================================
-// SELECTOR DE MARCHAS VW AUTOSTICK — V8.3 — INTERFAZ DE PRUEBAS SERIE
-// Base: v8.2.5 — Interfaz de pruebas serie para calibración
+// SELECTOR DE MARCHAS VW AUTOSTICK — V8.3.1 — Tiempos K1 N
+// Base: V8.3 — INTERFAZ DE PRUEBAS SERIE
 // =============================================================================
 
 #include <EEPROM.h>
@@ -22,7 +22,7 @@ const uint16_t TOLERANCIA_ADC              = 25;
 const uint16_t ESCALA_NORMALIZADA_POR_MARCHA = 1000;
 const uint16_t TOLERANCIA_DISCREPANCIA_NORMALIZADA = 60;
 const uint16_t PASO_APRENDIZAJE_MS         = 100;
-const uint16_t TIEMPO_PAUSA_N               = 500;
+const uint16_t TIEMPO_PAUSA_N               = 1000;
 
 const uint16_t RANGO_MIN_ADC               = 10;
 const uint16_t RANGO_MAX_ADC               = 1013;
@@ -194,6 +194,9 @@ uint16_t posADC_B[4];
 
 uint32_t tiempoInicio = 0;
 uint32_t tiempoAux = 0;
+
+bool retencionK1PostPosicionActiva = false;
+uint32_t inicioRetencionK1PostPosicion = 0;
 
 bool relInActivo = false;
 bool relOutActivo = false;
@@ -388,6 +391,7 @@ void iniciarIrAN();
 void iniciarMovimientoFinal(Marcha destino);
 void iniciarEsperaFCS();
 void resetearEstadoManiobra();
+void gestionarRetencionK1PostPosicion();
 void continuarDesdePausaN();
 void procesarRedireccionManiobra();
 void estadoErrorGrave();
@@ -841,6 +845,7 @@ void vigilarK2() {
 }
 
 void apagarTodoReles() {
+  retencionK1PostPosicionActiva = false;
   apagarActuador();
   desactivarK1();
   desactivarK2();
@@ -997,8 +1002,7 @@ void moverHacia(uint16_t pos) {
   DBG_VAL(estadoActual);
   DBG(F(" | ACTUAL="));
   DBG_VAL(nombreMarcha(marchaActual));
-  DBG(F(" | DESTINO="));
-  DBG_VAL(nombreMarcha(marchaDestino));
+  DBG(F(" | DESTINO="));DBG_VAL(nombreMarcha(marchaDestino));
   DBG(F(" | P="));
   DBG_VAL(potDoble.lecturaEfectiva);
   DBG(F(" | OBJ="));
@@ -1251,16 +1255,18 @@ void estadoReposo() {
   
   Marcha nuevoDestino;
 
-  if (!obtenerNuevaOrden(nuevoDestino)) {
+  if (obtenerNuevaOrden(nuevoDestino)) {
+    if (nuevoDestino == marchaActual) {
+      limpiarOrdenesPendientes();
+    } else {
+      // Una nueva orden durante la retención mantiene K1 activo y sustituye
+      // inmediatamente la espera pendiente.
+      iniciarCambioA(nuevoDestino);
+    }
     return;
   }
 
-  if (nuevoDestino == marchaActual) {
-    limpiarOrdenesPendientes();
-    return;
-  }
-
-  iniciarCambioA(nuevoDestino);
+  gestionarRetencionK1PostPosicion();
 }
 
 void gestionarLEDsNormal() {
@@ -1345,6 +1351,7 @@ void resetearEstadoManiobra() {
 }
 
 void iniciarCambioA(Marcha destino) {
+  retencionK1PostPosicionActiva = false;
   pruebaK1Temporizada = false;
   DBG(F("INICIAR CAMBIO | ORIGEN "));
   DBG_VAL(nombreMarcha(marchaActual));
@@ -1359,6 +1366,17 @@ void iniciarCambioA(Marcha destino) {
   activarK1();
   estadoActual = ESPERANDO_FC_C;
   logCambioMarcha(marchaOrigen, marchaDestino);
+}
+
+void gestionarRetencionK1PostPosicion() {
+  if (!retencionK1PostPosicionActiva) {
+    return;
+  }
+
+  if ((millis() - inicioRetencionK1PostPosicion) >= 1000UL) {
+    retencionK1PostPosicionActiva = false;
+    desactivarK1();
+  }
 }
 
 void iniciarIrAN() {
@@ -1474,7 +1492,6 @@ void continuarDesdePausaN() {
 void confirmarMarcha(Marcha marcha) {
   apagarActuador();
   desactivarK2();
-  desactivarK1();
 
   marchaActual = marcha;
   marchaDestino = marcha;
@@ -1483,6 +1500,9 @@ void confirmarMarcha(Marcha marcha) {
   resetearEstadoManiobra();
   lecturaInicioMovimiento = 0;
   estadoActual = REPOSO;
+
+  retencionK1PostPosicionActiva = true;
+  inicioRetencionK1PostPosicion = millis();
 
   logPosicionAlcanzada(marcha);
 }
@@ -1997,8 +2017,7 @@ void imprimirDiagnosticoSistema() {
   if (potDoble.pistaAFallada && potDoble.pistaBFallada) {
     DBGLN(F("AMBAS FALLADAS"));
   } else if (potDoble.pistaAFallada || potDoble.pistaBFallada) {
-    DBGLN(F("UNA PISTA FALLADA"));
-  } else {
+    DBGLN(F("UNA PISTA FALLADA"));} else {
     DBGLN(F("OK"));
   }
 
@@ -2997,8 +3016,7 @@ void rehabilitarPista() {
     potDoble.motivoFalloA = POT_FALLO_NINGUNO;
     potDoble.contadorFalloA = 0;
     potDoble.contadorCongeladoA = 0;
-    potDoble.pistaActiva = 0;
-  } else {
+    potDoble.pistaActiva = 0;} else {
     potDoble.pistaBFallada = false;
     potDoble.motivoFalloB = POT_FALLO_NINGUNO;
     potDoble.contadorFalloB = 0;
