@@ -1,6 +1,6 @@
 // =============================================================================
-// SELECTOR DE MARCHAS VW AUTOSTICK — V8.3.1 — Tiempos K1 N
-// Base: V8.3 — INTERFAZ DE PRUEBAS SERIE
+// SELECTOR DE MARCHAS VW AUTOSTICK — V8.3.2 — Correcciones de lógica de maniobras
+// Base: v8.3.1 — Tiempos K1 y N
 // =============================================================================
 
 #include <EEPROM.h>
@@ -896,17 +896,20 @@ uint8_t indiceMarchaFisica(Marcha marcha) {
   return 0;
 }
 
+
 bool normalizarLecturaPista(uint16_t lectura, uint8_t pista, int32_t &posicion) {
   if (pista > 1 || !validarLectura(lectura)) return false;
 
   uint16_t *pos = (pista == 0) ? posADC_A : posADC_B;
-  const Marcha ordenFisico[4] = {MARCHA_R, MARCHA_1, MARCHA_N, MARCHA_2};
+  const Marcha ordenFisico[4] = {
+    MARCHA_R, MARCHA_1, MARCHA_N, MARCHA_2
+  };
 
   // La escala común se construye por tramos físicos R-1-N-2.
-  // Cada pista se transforma usando sus propios puntos aprendidos.
   for (uint8_t i = 0; i < 3; i++) {
     uint16_t a = pos[ordenFisico[i]];
     uint16_t b = pos[ordenFisico[i + 1]];
+
     if (a >= b) return false;
   }
 
@@ -915,28 +918,50 @@ bool normalizarLecturaPista(uint16_t lectura, uint8_t pista, int32_t &posicion) 
   uint16_t x2 = pos[MARCHA_N];
   uint16_t x3 = pos[MARCHA_2];
 
+  // Fuera de los extremos se satura la posición normalizada.
+  // Es importante no interpolar desde R hacia valores inferiores,
+  // porque lectura y puntos ADC son uint16_t y producirían underflow.
+  if (lectura <= x0) {
+    posicion = 0;
+    return true;
+  }
+
+  if (lectura >= x3) {
+    posicion = 3L * ESCALA_NORMALIZADA_POR_MARCHA;
+    return true;
+  }
+
   uint16_t xa;
   uint16_t xb;
   int32_t ya;
   int32_t yb;
 
-  if (lectura <= x0) {
-    xa = x0; xb = x1; ya = 0; yb = ESCALA_NORMALIZADA_POR_MARCHA;
-  } else if (lectura <= x1) {
-    xa = x0; xb = x1; ya = 0; yb = ESCALA_NORMALIZADA_POR_MARCHA;
+  if (lectura <= x1) {
+    xa = x0;
+    xb = x1;
+    ya = 0;
+    yb = ESCALA_NORMALIZADA_POR_MARCHA;
   } else if (lectura <= x2) {
-    xa = x1; xb = x2; ya = ESCALA_NORMALIZADA_POR_MARCHA; yb = 2L * ESCALA_NORMALIZADA_POR_MARCHA;
-  } else if (lectura <= x3) {
-    xa = x2; xb = x3; ya = 2L * ESCALA_NORMALIZADA_POR_MARCHA; yb = 3L * ESCALA_NORMALIZADA_POR_MARCHA;
+    xa = x1;
+    xb = x2;
+    ya = ESCALA_NORMALIZADA_POR_MARCHA;
+    yb = 2L * ESCALA_NORMALIZADA_POR_MARCHA;
   } else {
-    xa = x2; xb = x3; ya = 2L * ESCALA_NORMALIZADA_POR_MARCHA; yb = 3L * ESCALA_NORMALIZADA_POR_MARCHA;
+    xa = x2;
+    xb = x3;
+    ya = 2L * ESCALA_NORMALIZADA_POR_MARCHA;
+    yb = 3L * ESCALA_NORMALIZADA_POR_MARCHA;
   }
 
   if (xb <= xa) return false;
 
-  posicion = ya + ((int32_t)(lectura - xa) * (yb - ya)) / (int32_t)(xb - xa);
+  posicion =
+    ya + ((int32_t)(lectura - xa) * (yb - ya)) /
+         (int32_t)(xb - xa);
+
   return true;
 }
+
 
 bool posicionNormalizadaEnMarcha(uint16_t lectura, uint8_t pista, Marcha marcha) {
   int32_t posicion;
@@ -1538,7 +1563,16 @@ void maniobraN() {
 void maniobraR() {
   switch (estadoSubmaniobra) {
     case MANIOBRA_INICIO:
-      if (fcSCarrilR()) {
+      if (marchaOrigen == MARCHA_N) {
+        activarK2();
+
+        if (fcSCarrilR()) {
+          logFCCambio(F("FC_S R OK"));
+          iniciarMovimientoFinal(MARCHA_R);
+        } else {
+          iniciarEsperaFCS();
+        }
+      } else if (fcSCarrilR()) {
         iniciarMovimientoFinal(MARCHA_R);
       } else {
         iniciarIrAN();
@@ -1683,21 +1717,10 @@ void maniobra1() {
 
 void maniobra2() {
   switch (estadoSubmaniobra) {
-    case MANIOBRA_INICIO: {
-      if (!fcSCarrilPrincipal()) {
-        iniciarIrAN();
-        return;
-      }
-      uint16_t p = leerPot();
-      uint16_t uno = posEfectiva(MARCHA_1);
-      uint16_t n = posEfectiva(MARCHA_N);
-      if (p >= uno && p <= n) {
-        iniciarIrAN();
-        return;
-      }
-      iniciarMovimientoFinal(MARCHA_2);
+    case MANIOBRA_INICIO:
+      // Desde 1, el paso por N es siempre obligatorio antes de llegar a 2.
+      iniciarIrAN();
       return;
-    }
 
     case MANIOBRA_IR_A_N:
       if (enPosicion(posEfectiva(MARCHA_N))) {
@@ -1756,6 +1779,7 @@ void maniobra2() {
       return;
   }
 }
+
 
 void ejecutarManiobra() {
   if (timeoutK2) {
@@ -1861,7 +1885,7 @@ void printResetCause() {
 
 void printDiagnosticoInicial() {
 #if DEBUG
-  DBGLN(F("VERSION V8.2.5"));
+  DBGLN(F("VERSION V8.3.2"));
   printResetCause();
 
   DBG(F("EEP R")); DBG_VAL(posADC_A[MARCHA_R]); DBG(F("/")); DBG_VAL(posADC_B[MARCHA_R]);
@@ -1886,6 +1910,7 @@ void logCambioMarcha(Marcha origen, Marcha destino) {
 
 void logOrden(const __FlashStringHelper* boton, Marcha actual, Marcha destino) {
 #if DEBUG
+  DBGLN(F("=============================================="));
   DBG(F("BOTON "));
   DBG_VAL(boton);
   DBG(F(" | ACTUAL "));
@@ -1894,6 +1919,7 @@ void logOrden(const __FlashStringHelper* boton, Marcha actual, Marcha destino) {
   DBGLN_VAL(nombreMarcha(destino));
 #endif
 }
+
 
 void logRele(const __FlashStringHelper* nombre, bool activado) {
 #if DEBUG
