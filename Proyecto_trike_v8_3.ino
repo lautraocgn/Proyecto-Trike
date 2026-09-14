@@ -1,6 +1,6 @@
 // =============================================================================
-// SELECTOR DE MARCHAS VW AUTOSTICK — V8.3.2 — Correcciones de lógica de maniobras
-// Base: v8.3.1 — Tiempos K1 y N
+// SELECTOR DE MARCHAS VW AUTOSTICK — V8.3.3 — INTERFAZ DE PRUEBAS SERIE
+// Base: v8.3.2 — Correción lógica de maniobras
 // =============================================================================
 
 #include <EEPROM.h>
@@ -14,7 +14,7 @@
 const uint16_t DEBOUNCE_MS                  = 20;
 const uint16_t VENTANA_DOBLE_PULSACION_MS  = 500;
 const uint16_t TIEMPO_PULSACION_LARGA_MS   = 600;
-const uint16_t TIMEOUT_MS                   = 3000;
+const uint16_t TIMEOUT_MS                   = 4000;
 const uint16_t TIEMPO_MUERTO_INVERSION_MS  = 150;
 const uint16_t TIEMPO_MAX_K2               = 3000;
 const uint16_t TIEMPO_LECTURA_POT          = 20;
@@ -243,6 +243,19 @@ uint32_t tiempoPotAlert = 0;
 bool ambasPistasFalladas = false;
 uint8_t contadorDiscrepanciaPistas = 0;
 
+// Supervisión de congelación en dos etapas.
+// Tras una primera ventana sin movimiento se espera 1 s con IN/OUT activo
+// antes de realizar la segunda comprobación.
+bool comprobacionCongelacionPendiente = false;
+uint32_t inicioEsperaCongelacion = 0;
+uint16_t referenciaCongelacionA = 0;
+uint16_t referenciaCongelacionB = 0;
+uint8_t lecturasConfirmacionCongelacion = 0;
+uint16_t minimoCambioConfirmacionA = 0;
+uint16_t minimoCambioConfirmacionB = 0;
+bool congelacionConfirmadaA = false;
+bool congelacionConfirmadaB = false;
+
 const uint8_t PISTA_NINGUNA = 255;
 uint8_t pistaEnRehabilitacion = PISTA_NINGUNA;
 uint8_t validacionesRehabilitacion[4] = {0, 0, 0, 0};
@@ -336,6 +349,7 @@ uint8_t indiceMarchaFisica(Marcha marcha);
 bool normalizarLecturaPista(uint16_t lectura, uint8_t pista, int32_t &posicion);
 bool posicionNormalizadaEnMarcha(uint16_t lectura, uint8_t pista, Marcha marcha);
 bool verificarPistas();
+void gestionarComprobacionCongelacion(bool moviendo, uint16_t valA, uint16_t valB);
 uint16_t posEfectiva(Marcha m);
 uint16_t obtenerLecturaSegura();
 uint16_t leerPot();
@@ -896,20 +910,17 @@ uint8_t indiceMarchaFisica(Marcha marcha) {
   return 0;
 }
 
-
 bool normalizarLecturaPista(uint16_t lectura, uint8_t pista, int32_t &posicion) {
   if (pista > 1 || !validarLectura(lectura)) return false;
 
   uint16_t *pos = (pista == 0) ? posADC_A : posADC_B;
-  const Marcha ordenFisico[4] = {
-    MARCHA_R, MARCHA_1, MARCHA_N, MARCHA_2
-  };
+  const Marcha ordenFisico[4] = {MARCHA_R, MARCHA_1, MARCHA_N, MARCHA_2};
 
   // La escala común se construye por tramos físicos R-1-N-2.
+  // Cada pista se transforma usando sus propios puntos aprendidos.
   for (uint8_t i = 0; i < 3; i++) {
     uint16_t a = pos[ordenFisico[i]];
     uint16_t b = pos[ordenFisico[i + 1]];
-
     if (a >= b) return false;
   }
 
@@ -919,8 +930,7 @@ bool normalizarLecturaPista(uint16_t lectura, uint8_t pista, int32_t &posicion) 
   uint16_t x3 = pos[MARCHA_2];
 
   // Fuera de los extremos se satura la posición normalizada.
-  // Es importante no interpolar desde R hacia valores inferiores,
-  // porque lectura y puntos ADC son uint16_t y producirían underflow.
+  // Evita underflow al trabajar con lecturas uint16_t inferiores a R.
   if (lectura <= x0) {
     posicion = 0;
     return true;
@@ -937,31 +947,18 @@ bool normalizarLecturaPista(uint16_t lectura, uint8_t pista, int32_t &posicion) 
   int32_t yb;
 
   if (lectura <= x1) {
-    xa = x0;
-    xb = x1;
-    ya = 0;
-    yb = ESCALA_NORMALIZADA_POR_MARCHA;
+    xa = x0; xb = x1; ya = 0; yb = ESCALA_NORMALIZADA_POR_MARCHA;
   } else if (lectura <= x2) {
-    xa = x1;
-    xb = x2;
-    ya = ESCALA_NORMALIZADA_POR_MARCHA;
-    yb = 2L * ESCALA_NORMALIZADA_POR_MARCHA;
+    xa = x1; xb = x2; ya = ESCALA_NORMALIZADA_POR_MARCHA; yb = 2L * ESCALA_NORMALIZADA_POR_MARCHA;
   } else {
-    xa = x2;
-    xb = x3;
-    ya = 2L * ESCALA_NORMALIZADA_POR_MARCHA;
-    yb = 3L * ESCALA_NORMALIZADA_POR_MARCHA;
+    xa = x2; xb = x3; ya = 2L * ESCALA_NORMALIZADA_POR_MARCHA; yb = 3L * ESCALA_NORMALIZADA_POR_MARCHA;
   }
 
   if (xb <= xa) return false;
 
-  posicion =
-    ya + ((int32_t)(lectura - xa) * (yb - ya)) /
-         (int32_t)(xb - xa);
-
+  posicion = ya + ((int32_t)(lectura - xa) * (yb - ya)) / (int32_t)(xb - xa);
   return true;
 }
-
 
 bool posicionNormalizadaEnMarcha(uint16_t lectura, uint8_t pista, Marcha marcha) {
   int32_t posicion;
@@ -1780,7 +1777,6 @@ void maniobra2() {
   }
 }
 
-
 void ejecutarManiobra() {
   if (timeoutK2) {
     timeoutK2 = false;
@@ -1885,13 +1881,13 @@ void printResetCause() {
 
 void printDiagnosticoInicial() {
 #if DEBUG
-  DBGLN(F("VERSION V8.3.2"));
+  DBGLN(F("VERSION V8.3.3"));
   printResetCause();
 
-  DBG(F("EEP R")); DBG_VAL(posADC_A[MARCHA_R]); DBG(F("/")); DBG_VAL(posADC_B[MARCHA_R]);
-  DBG(F(" N")); DBG_VAL(posADC_A[MARCHA_N]); DBG(F("/")); DBG_VAL(posADC_B[MARCHA_N]);
-  DBG(F(" 1")); DBG_VAL(posADC_A[MARCHA_1]); DBG(F("/")); DBG_VAL(posADC_B[MARCHA_1]);
-  DBG(F(" 2")); DBG_VAL(posADC_A[MARCHA_2]); DBG(F("/")); DBGLN_VAL(posADC_B[MARCHA_2]);
+  DBG(F("EEP R ")); DBG_VAL(posADC_A[MARCHA_R]); DBG(F("/")); DBG_VAL(posADC_B[MARCHA_R]);
+  DBG(F(" N ")); DBG_VAL(posADC_A[MARCHA_N]); DBG(F("/")); DBG_VAL(posADC_B[MARCHA_N]);
+  DBG(F(" 1ª ")); DBG_VAL(posADC_A[MARCHA_1]); DBG(F("/")); DBG_VAL(posADC_B[MARCHA_1]);
+  DBG(F(" 2ª ")); DBG_VAL(posADC_A[MARCHA_2]); DBG(F("/")); DBGLN_VAL(posADC_B[MARCHA_2]);
 
   DBG(F("Pot A:")); DBG_VAL(potDoble.lecturaA);
   DBG(F(" B:")); DBG_VAL(potDoble.lecturaB);
@@ -1919,7 +1915,6 @@ void logOrden(const __FlashStringHelper* boton, Marcha actual, Marcha destino) {
   DBGLN_VAL(nombreMarcha(destino));
 #endif
 }
-
 
 void logRele(const __FlashStringHelper* nombre, bool activado) {
 #if DEBUG
@@ -2434,6 +2429,10 @@ void procesarComandoSerial() {
           potDoble.contadorFalloB = 0;
           potDoble.contadorCongeladoA = 0;
           potDoble.contadorCongeladoB = 0;
+          comprobacionCongelacionPendiente = false;
+          lecturasConfirmacionCongelacion = 0;
+          congelacionConfirmadaA = false;
+          congelacionConfirmadaB = false;
           contadorDiscrepanciaPistas = 0;
 
           leerPotenciometro();
@@ -3061,6 +3060,55 @@ void rehabilitarPista() {
     potDoble.pistaAFallada && potDoble.pistaBFallada;
 }
 
+void gestionarComprobacionCongelacion(bool moviendo, uint16_t valA, uint16_t valB) {
+  congelacionConfirmadaA = false;
+  congelacionConfirmadaB = false;
+
+  if (!moviendo) {
+    comprobacionCongelacionPendiente = false;
+    lecturasConfirmacionCongelacion = 0;
+    minimoCambioConfirmacionA = 0;
+    minimoCambioConfirmacionB = 0;
+    return;
+  }
+
+  if (!comprobacionCongelacionPendiente) return;
+
+  // Si el actuador se detiene durante la espera, la comprobación deja de
+  // ser válida. No se declara congelación con el actuador parado.
+  if ((millis() - inicioEsperaCongelacion) < 1000UL) return;
+
+  lecturasConfirmacionCongelacion++;
+
+  uint16_t cambioA = (valA >= referenciaCongelacionA)
+                    ? (valA - referenciaCongelacionA)
+                    : (referenciaCongelacionA - valA);
+  uint16_t cambioB = (valB >= referenciaCongelacionB)
+                    ? (valB - referenciaCongelacionB)
+                    : (referenciaCongelacionB - valB);
+
+  if (cambioA > minimoCambioConfirmacionA) minimoCambioConfirmacionA = cambioA;
+  if (cambioB > minimoCambioConfirmacionB) minimoCambioConfirmacionB = cambioB;
+
+  if (lecturasConfirmacionCongelacion >= LECTURAS_CONGELADO) {
+    congelacionConfirmadaA = minimoCambioConfirmacionA < UMBRAL_CONGELADO;
+    congelacionConfirmadaB = minimoCambioConfirmacionB < UMBRAL_CONGELADO;
+
+    if (congelacionConfirmadaA || congelacionConfirmadaB) {
+      logAccion(F("CONGELACION CONFIRMADA"));
+    } else {
+      logAccion(F("CONGELACION DESCARTADA"));
+    }
+
+    comprobacionCongelacionPendiente = false;
+    lecturasConfirmacionCongelacion = 0;
+    minimoCambioConfirmacionA = 0;
+    minimoCambioConfirmacionB = 0;
+    potDoble.contadorCongeladoA = 0;
+    potDoble.contadorCongeladoB = 0;
+  }
+}
+
 bool verificarPistas() {
   uint16_t valA = potDoble.lecturaA;
   uint16_t valB = potDoble.lecturaB;
@@ -3105,11 +3153,22 @@ bool verificarPistas() {
         potDoble.contadorCongeladoB = 0;
       }
 
-      congeladaA =
-        potDoble.contadorCongeladoA >= LECTURAS_CONGELADO;
-
-      congeladaB =
-        potDoble.contadorCongeladoB >= LECTURAS_CONGELADO;
+      // Ocho lecturas sin cambio solo generan una sospecha. La confirmación
+      // se realiza en una segunda ventana tras 1 s de movimiento continuo.
+      if (!comprobacionCongelacionPendiente &&
+          (potDoble.contadorCongeladoA >= LECTURAS_CONGELADO ||
+           potDoble.contadorCongeladoB >= LECTURAS_CONGELADO)) {
+        comprobacionCongelacionPendiente = true;
+        inicioEsperaCongelacion = millis();
+        referenciaCongelacionA = valA;
+        referenciaCongelacionB = valB;
+        lecturasConfirmacionCongelacion = 0;
+        minimoCambioConfirmacionA = 0;
+        minimoCambioConfirmacionB = 0;
+        potDoble.contadorCongeladoA = 0;
+        potDoble.contadorCongeladoB = 0;
+        logAccion(F("SOSPECHA CONGELACION: esperando 1 s"));
+      }
 
       if (relInActivo) {
         if (deltaA > 5) direccionIncorrectaA = true;
@@ -3123,6 +3182,10 @@ bool verificarPistas() {
       potDoble.contadorCongeladoB = 0;
     }
   }
+
+  gestionarComprobacionCongelacion(moviendo, valA, valB);
+  congeladaA = congelacionConfirmadaA;
+  congeladaB = congelacionConfirmadaB;
 
   bool falloActualA =
     fueraRangoA || saltoA || congeladaA || direccionIncorrectaA;
