@@ -1,9 +1,11 @@
 # PROJECT_STATE — Proyecto Trike
 
-**Versión de referencia:** v8.3.2  
+**Versión de referencia:** v8.3.4 — Control IN/OUT por PWM  
 **Código principal:** `Proyecto_trike_v8_3.ino`  
-**Base funcional:** v8.3.1 — Tiempos K1 N  
+**Base funcional:** v8.3.3 — Interfaz de pruebas serie  
 **Rama:** `main`
+
+> Nota de sincronización: las modificaciones de v8.3.4 descritas en este documento corresponden al firmware de trabajo probado físicamente. El código de GitHub debe quedar sincronizado con esta versión mediante el commit de v8.3.4. Si existe contradicción entre este documento y el código publicado, prevalece el código.
 
 ## Fuente de verdad
 
@@ -21,15 +23,15 @@ No usar versiones antiguas, otros proyectos ni memoria no confirmada para comple
 
 - Arduino Nano / ATmega328P.
 
-## Pinout actual
+## Pinout actual v8.3.4
 
 | Función | Pin |
 |---|---:|
 | BTN UP | D3 |
 | BTN DOWN | D2 |
-| Relé movimiento IN | D4 |
-| Relé movimiento OUT | D5 |
-| K2 | D6 |
+| Movimiento IN / PWM | D6 |
+| Movimiento OUT / PWM | D5 |
+| K2 | D4 |
 | LED R | D7 |
 | K1 | D8 |
 | LED 1 | D9 |
@@ -43,7 +45,7 @@ No usar versiones antiguas, otros proyectos ni memoria no confirmada para comple
 | Potenciómetro B | A3 |
 | LED aviso potenciómetro | A4 |
 
-Las salidas de relés/actuadores se consideran activas en HIGH.
+Las salidas de movimiento se consideran activas en HIGH. D6 y D5 se utilizan como salidas PWM para controlar la velocidad del actuador. K2 se ha trasladado a D4.
 
 ## Posiciones
 
@@ -59,6 +61,13 @@ Orden físico longitudinal confirmado:
 `R ↔ 1 ↔ N ↔ 2`
 
 La escala normalizada de las pistas usa ese orden físico.
+
+Posiciones EEPROM utilizadas en las pruebas:
+
+- R: A `334`, B `338`
+- N: A `703`, B `709`
+- 1: A `461`, B `468`
+- 2: A `874`, B `878`
 
 ## Máquina de estados normal
 
@@ -111,12 +120,52 @@ Las lecturas de cada pista se transforman a una escala común de 0..3000 siguien
 
 La v8.3.2 corrige un problema de `uint16_t` al procesar lecturas inferiores al punto aprendido de R o superiores al punto aprendido de 2. Fuera de los extremos se satura la posición normalizada en 0 o 3000 respectivamente, evitando underflow y falsos resultados de discrepancia.
 
+## Control de velocidad del actuador — v8.3.4
+
+La salida de movimiento IN y OUT se controla mediante PWM integrado en las funciones `activarReleIn()` y `activarReleOut()`, manteniendo centralizada la lógica existente de inversión y tiempo muerto.
+
+Configuración validada en las pruebas de esta etapa:
+
+- `TOLERANCIA_ADC = 25`.
+- Distancia de frenado: `50 ADC`.
+- Distancia `>50 ADC`: PWM rápido `255` (100 %).
+- Distancia `26..50 ADC`: PWM lento `60` (~24 %).
+- Distancia `<=25 ADC`: se considera posición alcanzada y se detiene el actuador.
+
+No se añadió un tercer escalón de velocidad.
+
+El PWM se actualiza mientras el sentido permanece activo, por lo que la transición de velocidad se produce sin perder la gestión centralizada de IN/OUT.
+
+El tiempo muerto entre inversiones se mantiene en `150 ms`.
+
+### Motivo de la estrategia
+
+Las pruebas anteriores con tolerancia de 15 ADC y PWM lento del 50 % produjeron oscilaciones y grandes sobrepasos alrededor del objetivo. Se decidió volver a una tolerancia de 25 ADC y reducir la velocidad de aproximación a aproximadamente 25 %.
+
+Las pruebas con `TOLERANCIA_ADC = 25`, frenado desde 50 ADC y PWM lento `60` mostraron una mejora clara en la aproximación y una reducción importante del sobrepaso respecto a la configuración anterior.
+
+### Limitación de las pruebas
+
+Las pruebas de esta etapa se realizaron con el actuador **desconectado físicamente de la caja de cambios**. Por tanto, la inercia y la dinámica observadas no representan todavía la condición final bajo carga.
+
+Se ha observado una ligera tendencia global a terminar por debajo del objetivo en las maniobras probadas, aunque dentro de la tolerancia. No se considera suficientemente representativa para modificar el control antes de probar el actuador instalado en la caja.
+
+El posible comportamiento bajo carga sigue sin estar verificado. Es razonable esperar que la carga mecánica pueda aumentar la tendencia a quedarse corto, pero esto es una hipótesis que debe comprobarse físicamente.
+
+## Freno eléctrico — idea pendiente
+
+El hardware permite considerar como alternativa futura un frenado eléctrico aplicando positivo a ambas bornas del motor simultáneamente.
+
+La idea queda registrada como posible mecanismo para reducir el recorrido residual después de cortar el movimiento si las pruebas con el actuador instalado demuestran un sobrepaso sistemático.
+
+**No está implementado en v8.3.4.** No debe incorporarse al firmware hasta verificar eléctricamente el comportamiento del puente H bajo esta condición y demostrar mediante pruebas que resulta necesario.
+
 ## Relés y temporización
 
 - `K1`: se activa al iniciar una maniobra normal y se desactiva al finalizarla según la lógica existente.
 - `K2`: utilizado en las secuencias que requieren cambio de carril hacia R.
 - `TIEMPO_MAX_K2 = 3000 ms`.
-- `TIMEOUT_MS = 3000 ms`.
+- `TIMEOUT_MS = 4000 ms` en el firmware de trabajo v8.3.4.
 - `TIEMPO_MUERTO_INVERSION_MS = 150 ms` entre inversiones IN/OUT.
 - `TIEMPO_PAUSA_N = 1000 ms` cuando la secuencia requiere pausa en N.
 - La ventana de doble pulsación de 500 ms se mantiene deliberadamente y no debe modificarse como solución a los tiempos de maniobra.
@@ -129,35 +178,50 @@ Se estableció que los cambios `1 ↔ 2` deben pasar siempre físicamente por N,
 
 En particular, `1 → 2` ya no decide saltarse N basándose en la posición instantánea del potenciómetro: inicia directamente la secuencia `IR_A_N`.
 
-Las pruebas físicas confirmaron que `N → 1 → 2` funciona pasando por N y que la llegada a 2 se completa correctamente mediante FC_S y la posición ADC aprendida.
-
 ### N → R directo
 
 Cuando la maniobra parte de N y el destino es R, se evita la pausa de 1 s en N que se utilizaba al entrar en N desde otras marchas. K2 puede activarse inmediatamente una vez iniciada la maniobra, respetando la lógica de FC_S y movimiento final.
 
-Esto elimina el retardo innecesario observado al solicitar R estando ya en N, sin eliminar la pausa de N necesaria en maniobras que realmente atraviesan N.
-
 ### Separación visual del monitor serie
 
-Al registrar una nueva orden UP/DOWN se imprime una única línea separadora de `=` antes del mensaje de la orden. Se ha elegido esta solución para mejorar la lectura de las pruebas sin añadir una cantidad significativa de tráfico serie ni consumo de memoria.
+Al registrar una nueva orden UP/DOWN se imprime una única línea separadora de `=` antes del mensaje de la orden.
 
-## Pruebas físicas realizadas y conclusiones
+## Pruebas físicas y conclusiones de v8.3.4
 
-### Funcionamiento confirmado
+### Control PWM
 
-En las pruebas de esta etapa se confirmó físicamente:
+Se realizaron pruebas de movimiento directo por ADC y maniobras completas utilizando PWM.
 
-- Arranque y posicionamiento automático en N.
-- N → R completando el movimiento hasta la posición aprendida de R.
-- R → N completando el movimiento hasta la posición aprendida de N.
-- N → 1 completando el movimiento hasta la posición aprendida de 1.
-- 1 → 2 completando el movimiento hasta la posición aprendida de 2.
-- La lógica de `1 → 2` pasa por N y no se salta N por una lectura ADC instantánea.
-- La corrección de normalización evita el `ERROR_GRAVE` observado anteriormente al trabajar cerca o por debajo del extremo R.
+Con PWM lento `60` y frenado desde 50 ADC se observaron aproximaciones considerablemente más suaves que con PWM lento `128`.
 
-### Anomalías observadas
+Ejemplos de posiciones finales observadas en maniobras completas:
 
-#### 1. Falsa detección de congelación durante movimiento — PENDIENTE
+- N → 1: `465` frente a objetivo `461` → `+4 ADC`.
+- 1 → N: `708` frente a `703` → `+5 ADC`.
+- N → R: `330` frente a `334` → `−4 ADC`.
+- R → 1: `453` frente a `461` → `−8 ADC`.
+- 2 → 1: `460` frente a `461` → `−1 ADC`.
+- 1 → N: `709` frente a `703` → `+6 ADC`.
+
+También se observaron casos de aproximadamente `−16/-17 ADC`, todavía dentro de la tolerancia de 25 ADC.
+
+En una prueba ADC hacia `650`, la aproximación finalizó en `659` tras entrar en la zona lenta, mostrando un error de `+9 ADC`.
+
+### Tendencia de posición
+
+En el conjunto de maniobras registrado se observó una ligera tendencia a quedar corto respecto al objetivo, no una tendencia dominante a sobrepasarlo.
+
+Esta conclusión es únicamente válida para las pruebas realizadas con el actuador desacoplado de la caja. No debe extrapolarse todavía a la condición bajo carga.
+
+### Estado actual de la estrategia
+
+La configuración PWM actual se considera **provisionalmente adecuada para continuar las pruebas**.
+
+No modificar de momento tolerancia, distancia de frenado ni PWM lento. La siguiente validación importante debe realizarse con el actuador instalado y conectado mecánicamente a la caja.
+
+## Anomalías observadas
+
+### 1. Falsa detección de congelación durante movimiento — PENDIENTE
 
 Se ha demostrado la siguiente cadena de fallo en una prueba anterior:
 
@@ -169,33 +233,21 @@ Lo que todavía NO está demostrado es por qué las dos pistas dejan de cambiar 
 
 No se debe simplemente desactivar la detección de congelación sin entender primero esta condición.
 
-#### 2. Incoherencia entre posición física y estado lógico — PENDIENTE
+### 2. Incoherencia entre posición física y estado lógico — PENDIENTE
 
-En una prueba se observó que, después de una secuencia anómala durante `2 → 1`, el sistema terminó en:
-
-- Estado lógico: `REPOSO`.
-- `marchaActual`: N.
-- LED correspondiente: N.
-- Lecturas ADC: aproximadamente 863/869, correspondientes a la zona física de 2 según las posiciones aprendidas de esa prueba (`N ≈ 703/709`, `2 ≈ 874/878`).
+En una prueba se observó que, después de una secuencia anómala durante `2 → 1`, el sistema terminó con estado lógico N mientras las lecturas ADC correspondían a la zona física de 2.
 
 El firmware actual no detecta esta incoherencia en REPOSO porque la supervisión de potenciómetros comprueba salud de las pistas y discrepancia A/B, pero no valida de forma permanente que la posición física ADC sea coherente con `marchaActual`.
 
 Queda pendiente definir e implementar una supervisión de coherencia entre la posición física medida y la marcha lógica confirmada. Antes de modificar el comportamiento hay que decidir qué acción de seguridad debe tomar el sistema ante una posición física inesperada.
 
-#### 3. Entrada espuria en modo aprendizaje — PENDIENTE DE PRUEBA FÍSICA
+### 3. Entrada espuria en modo aprendizaje — PENDIENTE DE PRUEBA FÍSICA
 
-Durante una maniobra `2 → 1` se produjo una entrada inesperada en la máquina de aprendizaje. La secuencia registrada mostró el paso por `APRENDIZAJE_IR_A_2`, incompatible con la maniobra normal solicitada.
+Durante una maniobra `2 → 1` se produjo una entrada inesperada en la máquina de aprendizaje. La hipótesis de trabajo es una lectura LOW espuria en D11 debido a que la entrada estaba eléctricamente indefinida.
 
-La hipótesis de trabajo es una lectura LOW espuria en D11 debido a que la entrada estaba eléctricamente indefinida. La corrección prevista es instalar una resistencia externa de 10 kΩ pull-up a +5 V y mantener el interruptor de modo conectando D11 a GND cuando se solicite aprendizaje.
+La corrección prevista es instalar una resistencia externa de 10 kΩ pull-up a +5 V y mantener el interruptor de modo conectando D11 a GND cuando se solicite aprendizaje.
 
 No se realizará una modificación de firmware hasta comprobar el comportamiento con D11 correctamente polarizado.
-
-## Observaciones importantes de las pruebas
-
-- Los cambios de marcha y los valores ADC deben analizarse conjuntamente con los finales de carrera y los relés; una lectura ADC aislada no basta para determinar el estado físico completo.
-- En una prueba N → R se observaron lecturas ADC anormalmente altas al comienzo de la maniobra y, en otra, un comportamiento en el que ambas pistas variaron conjuntamente de forma inesperada. No se ha establecido todavía una causa definitiva; queda como evidencia de campo para futuras pruebas, no como diagnóstico confirmado.
-- Durante una aproximación a R se observó pérdida temporal de `FC_S R`, seguida de cambio de sentido y nueva búsqueda. La lógica actual reacciona a esa pérdida del final de carrera; debe conservarse como comportamiento a considerar en futuras validaciones.
-- El hecho de que A y B presenten valores similares no demuestra por sí solo que la posición física sea correcta: ambas pistas pueden coincidir en una posición incorrecta. Por ello la supervisión de coherencia absoluta con la marcha lógica es una cuestión independiente de la redundancia A/B.
 
 ## Interfaz de pruebas serie V8.3
 
@@ -233,15 +285,11 @@ La inversión respeta el tiempo muerto existente de 150 ms.
 
 `G` utiliza la lógica normal de maniobras y la redundancia A/B. Permite pedir directamente cualquier marcha; la máquina determina si debe pasar por N, esperar FC_S, activar K1/K2, etc.
 
-Cuando `G` se ejecuta desde aprendizaje, se utiliza temporalmente la máquina normal y, si termina correctamente, se vuelve al modo aprendizaje.
-
 ### K1
 
 - `K1 x` — activar K1 durante `x` ms.
 - `K1 ON` — activar K1 indefinidamente.
 - `K1 OFF` — desactivar K1.
-
-Una maniobra automática posterior vuelve a controlar K1 mediante su lógica normal.
 
 ### K2
 
@@ -275,19 +323,14 @@ Los comandos de prueba serie no se bloquean por estar en aprendizaje.
 
 Durante aprendizaje, la confirmación de una posición sigue almacenando las lecturas actuales A/B para la marcha seleccionada.
 
-## Validación v8.3.2
-
-- El commit de referencia actual es `2bfe1ccc89610f04958694ddbff06106bbce2821`.
-- La v8.3.2 ha sido cargada para continuar las pruebas físicas.
-- La compilación de versiones anteriores se realizó correctamente con Arduino CLI y core AVR; las pruebas físicas siguen siendo necesarias para validar actuador, relés, finales de carrera y sensores.
-- Las conclusiones de esta sección proceden de las pruebas físicas registradas durante la etapa v8.3.1/v8.3.2 y deben distinguirse de hipótesis todavía no verificadas.
-
 ## Pendientes inmediatos
 
-1. Investigar y corregir la falsa detección de congelación de ambas pistas durante movimiento con `OUT`.
-2. Diseñar y acordar el comportamiento ante incoherencia entre `marchaActual` y posición física ADC.
-3. Instalar resistencia externa de 10 kΩ pull-up en D11 y comprobar que desaparece la entrada espuria en aprendizaje.
-4. Repetir pruebas físicas de todas las maniobras después de resolver los puntos anteriores.
+1. Probar v8.3.4 con el actuador instalado y conectado a la caja de cambios.
+2. Comparar bajo carga la precisión, sobrepaso, tendencia a quedarse corto y repetibilidad de las maniobras.
+3. Mantener el freno eléctrico como posible solución futura únicamente si las pruebas reales demuestran sobrepaso residual significativo.
+4. Investigar y corregir la falsa detección de congelación de ambas pistas durante movimiento con `OUT`.
+5. Diseñar y acordar el comportamiento ante incoherencia entre `marchaActual` y posición física ADC.
+6. Instalar resistencia externa de 10 kΩ pull-up en D11 y comprobar que desaparece la entrada espuria en aprendizaje.
 
 ## Regla de modificación
 
